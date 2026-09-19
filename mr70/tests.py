@@ -225,20 +225,28 @@ def test_paper_observer():
     orig = pl.fetch_ohlcv
     try:
         pl.fetch_ohlcv = lambda *a, **k: tape(True)
+
+        # a symbol's first run must NOT log history as if it were forward data:
+        # it only sets the watermark, keeping the logged sample out of sample
+        st0 = {"symbols": {}}
+        s0, t0, f0 = pl.process_symbol("T/USDT:USDT", cfg, st0, True)
+        assert not s0 and not t0 and not f0, "first run logged backfill as live data"
+        assert st0["symbols"]["T/USDT:USDT"]["last_ts"], "watermark not set on first run"
+
         st = {"symbols": {}}
-        sigs, trades, fwd = pl.process_symbol("T/USDT:USDT", cfg, st, True)
+        sigs, trades, fwd = pl.process_symbol("T/USDT:USDT", cfg, st, True, backfill=True)
         assert len(sigs) == 1, "observer missed the climax signal"
         assert len(trades) == len(pl.GEOMETRIES), "both geometries must be reported"
         assert all(t["status"] == "tp" for t in trades), "engineered rally should hit TP"
         assert all(t["R_net"] < t["R_gross"] for t in trades), "costs must reduce net R"
         assert len(fwd) == pl.FORWARD_BARS, "forward bars not captured for re-analysis"
 
-        again, _, _ = pl.process_symbol("T/USDT:USDT", cfg, st, False)
+        again, _, _ = pl.process_symbol("T/USDT:USDT", cfg, st, False, backfill=True)
         assert not again, "same signal logged twice across a restart"
 
         pl.fetch_ohlcv = lambda *a, **k: tape(False)
         st2 = {"symbols": {}}
-        _, unf, _ = pl.process_symbol("T/USDT:USDT", cfg, st2, True)
+        _, unf, _ = pl.process_symbol("T/USDT:USDT", cfg, st2, True, backfill=True)
         assert all(t["status"] == "unfilled" for t in unf), "entry should not have filled"
         assert not any("R_net" in t for t in unf), "unfilled entry must not produce a result"
     finally:
@@ -248,7 +256,8 @@ def test_paper_observer():
     banned = ("create_order", "apiKey", "secret", "private_", "place_order")
     found = [w for w in banned if w in src]
     assert not found, f"paper observer contains order-capable code: {found}"
-    print("ok  paper observer: signals, both geometries, restart-safe, no order code")
+    print("ok  paper observer: forward-only by default, both geometries, "
+          "restart-safe, no order code")
 
 
 if __name__ == "__main__":
