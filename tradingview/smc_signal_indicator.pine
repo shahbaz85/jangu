@@ -199,41 +199,35 @@ eqhOut = float(na)
 eqlOut = float(na)
 if array.size(eqhLevels) > 0
     minAbove = float(na)
-    for i = 0 to array.size(eqhLevels) - 1
-        v = array.get(eqhLevels, i)
+    for v in eqhLevels
         if v > close[1]
             minAbove := na(minAbove) ? v : math.min(minAbove, v)
     eqhOut := minAbove
 if array.size(eqlLevels) > 0
     maxBelow = float(na)
-    for i = 0 to array.size(eqlLevels) - 1
-        v = array.get(eqlLevels, i)
+    for v in eqlLevels
         if v < close[1]
             maxBelow := na(maxBelow) ? v : math.max(maxBelow, v)
     eqlOut := maxBelow
 
 newEqh = array.new_float(0)
-for i = 0 to array.size(eqhLevels) - 1
-    v = array.get(eqhLevels, i)
+for v in eqhLevels
     if high <= v
         array.push(newEqh, v)
 eqhLevels := newEqh
 newEql = array.new_float(0)
-for i = 0 to array.size(eqlLevels) - 1
-    v = array.get(eqlLevels, i)
+for v in eqlLevels
     if low >= v
         array.push(newEql, v)
 eqlLevels := newEql
 
 newActSH = array.new_float(0)
-for i = 0 to array.size(actSH) - 1
-    v = array.get(actSH, i)
+for v in actSH
     if high <= v
         array.push(newActSH, v)
 actSH := newActSH
 newActSL = array.new_float(0)
-for i = 0 to array.size(actSL) - 1
-    v = array.get(actSL, i)
+for v in actSL
     if low >= v
         array.push(newActSL, v)
 actSL := newActSL
@@ -243,8 +237,7 @@ if not na(newSH)
     tolVal = eqTolATR * atrVal
     matched = array.new_float(0)
     array.push(matched, p)
-    for i = 0 to array.size(actSH) - 1
-        q = array.get(actSH, i)
+    for q in actSH
         if math.abs(p - q) <= tolVal
             array.push(matched, q)
     if array.size(matched) > 1
@@ -260,8 +253,7 @@ if not na(newSL)
     tolVal = eqTolATR * atrVal
     matched = array.new_float(0)
     array.push(matched, p)
-    for i = 0 to array.size(actSL) - 1
-        q = array.get(actSL, i)
+    for q in actSL
         if math.abs(p - q) <= tolVal
             array.push(matched, q)
     if array.size(matched) > 1
@@ -374,19 +366,21 @@ if buildLong
     fvgFound = false
     fvgLo = float(na)
     fvgHi = float(na)
-    for k = 0 to gap - 1
-        if not fvgFound and bullFvg[k]
-            zoneHi = high[k + 2]
-            zoneLo = low[k]
-            mid = (zoneHi + zoneLo) / 2
-            laterOk = true
-            for j = 0 to k - 1
-                if low[j] <= mid
-                    laterOk := false
-            if laterOk
-                fvgFound := true
-                fvgHi := zoneHi
-                fvgLo := zoneLo
+    if gap >= 1
+        for k = 0 to gap - 1
+            if not fvgFound and bullFvg[k]
+                zoneHi = high[k + 2]
+                zoneLo = low[k]
+                mid = (zoneHi + zoneLo) / 2
+                laterOk = true
+                if k >= 1
+                    for j = 0 to k - 1
+                        if low[j] <= mid
+                            laterOk := false
+                if laterOk
+                    fvgFound := true
+                    fvgHi := zoneHi
+                    fvgLo := zoneLo
 
     extOffset = 0
     extLowVal = low
@@ -523,19 +517,21 @@ if buildShort
     fvgFound = false
     fvgLo = float(na)
     fvgHi = float(na)
-    for k = 0 to gap - 1
-        if not fvgFound and bearFvg[k]
-            zoneHi = high[k]
-            zoneLo = low[k + 2]
-            mid = (zoneHi + zoneLo) / 2
-            laterOk = true
-            for j = 0 to k - 1
-                if high[j] >= mid
-                    laterOk := false
-            if laterOk
-                fvgFound := true
-                fvgHi := zoneHi
-                fvgLo := zoneLo
+    if gap >= 1
+        for k = 0 to gap - 1
+            if not fvgFound and bearFvg[k]
+                zoneHi = high[k]
+                zoneLo = low[k + 2]
+                mid = (zoneHi + zoneLo) / 2
+                laterOk = true
+                if k >= 1
+                    for j = 0 to k - 1
+                        if high[j] >= mid
+                            laterOk := false
+                if laterOk
+                    fvgFound := true
+                    fvgHi := zoneHi
+                    fvgLo := zoneLo
 
     extOffset = 0
     extHighVal = high
