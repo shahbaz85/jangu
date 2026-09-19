@@ -128,3 +128,45 @@ measurable edge on BTC -- a plausible reason is that it's a well-known,
 widely-traded pattern on a highly liquid, closely-watched asset. Not
 recommended for live capital. `pool_symbols.py --strategy trend` is available
 to test it across more symbols if that's ever worth revisiting.
+
+## mr70/: MR-70 high-win-rate mean reversion — findings
+
+Pre-registered spec (`MR70_STRATEGY_SPEC.md`): TP 0.75 ATR / SL 2.0 ATR on 15m
+BNB/ETH/SOL/DOGE, 730 days, four signal variants plus a random control, with a
+gate requiring a pooled hit-rate lift of >= +4 pp over random with the 95% CI
+lower bound above zero.
+
+**No variant passed the gate.** Pooled, against a 6,883-trade random baseline of
+68.73%:
+
+| variant | trades | hit rate | lift | 95% CI | verdict |
+|---|---|---|---|---|---|
+| V1 Bollinger+RSI | 569 | 69.2% | +0.51 pp | [-3.44, +4.46] | fail |
+| V2 RSI(2) in trend | 648 | 71.5% | +2.72 pp | [-0.93, +6.36] | fail |
+| V3 VWAP climax | 446 | 72.9% | +4.14 pp | [-0.13, +8.40] | fail (CI) |
+| V4 V3 + trend | 159 | 73.6% | +4.85 pp | [-2.09, +11.79] | fail (CI) |
+
+Validation that the machinery works: on `synthetic()` random-walk data the same
+control reproduces a 70.8% baseline and no variant beats it, independently
+matching the spec's own preliminary 71-72% figure.
+
+**The more important finding is that the +4 pp gate was never sufficient.** The
+random baseline on this symbol set is 68.73%, lower than the 71-72% the spec's
+preliminary work saw on BTC/DOGE/AVAX. So baseline + 4 pp = 72.73%, which is
+*exactly* break-even BEFORE costs. Including costs, break-even is:
+
+    p = (sl_atr + cost/ATR) / (tp_atr + sl_atr)
+
+which for a round trip of 0.09-0.11% of price and ATR of 0.3-1.0% of price lands
+between **76% and 84%**. Reaching that from a 68.73% baseline needs roughly
+**+8 to +12 pp**, not +4. The best variant managed +4.85 pp on 159 trades.
+
+**Biggest weakness in the design:** the geometry is cost-hostile. A 0.75 ATR
+take-profit is small enough that fixed costs eat 20-30% of every winning trade,
+so the hit rate required for profitability climbs far above the headline 72.73%.
+High win rate and cost efficiency pull against each other here, and shrinking the
+target to raise the win rate makes the cost drag worse, not better.
+
+Per the spec, the backtest (step 4/5) was not run on any variant, since none
+passed the gate. V3 was the most consistent across symbols (70.1-74.8%) and is
+the only one worth revisiting if the geometry were changed.
