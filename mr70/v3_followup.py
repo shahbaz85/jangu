@@ -38,14 +38,24 @@ FOLLOWUP_SYMBOLS = ["BTC/USDT:USDT", "AVAX/USDT:USDT", "XRP/USDT:USDT", "ADA/USD
 MIN_POOLED = 300
 
 
-def followup_config() -> MR70Config:
-    """Main spec, with only what the addendum changes."""
+def followup_config(geometry: str = "new") -> MR70Config:
+    """Main spec, with only what the addendum changes.
+
+    geometry="new"  -> the addendum's TP 1.5 / SL 3.0 ATR, 32-bar stop.
+    geometry="old"  -> the main spec's TP 0.75 / SL 2.0 ATR, 16-bar stop, run on
+                       the FRESH symbols. Requested explicitly to separate two
+                       confounded explanations for the follow-up's reversal:
+                       a geometry effect, or selection noise in the original
+                       +4.14 pp that simply failed to replicate out of sample.
+                       Only the symbols differ from the original measurement.
+    """
+    geo = {"new": (1.5, 3.0, 32), "old": (0.75, 2.0, 16)}[geometry]
     return replace(
         MR70Config(),
         symbols=FOLLOWUP_SYMBOLS,
-        tp_atr=1.5,
-        sl_atr=3.0,
-        max_bars=32,
+        tp_atr=geo[0],
+        sl_atr=geo[1],
+        max_bars=geo[2],
         slippage=0.0002,                                   # BTC
         slippage_high=0.0004,                              # AVAX, XRP, ADA
         high_slip_symbols=("AVAX/USDT:USDT", "XRP/USDT:USDT", "ADA/USDT:USDT"),
@@ -96,6 +106,7 @@ def assess(f, signals, cfg, symbol: str):
         "mean_cl": float(np.mean(cls)) if cls else float("nan"),
         "time_stops": sum(1 for r in traded if r["status"] == "time"),
         "unfilled": sum(1 for r in outcomes if r["status"] == "unfilled"),
+        "tp_too_small": sum(1 for r in outcomes if r["status"] == "tp_too_small_vs_fees"),
         "bes": bes,
     }
 
@@ -201,12 +212,24 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--synthetic", action="store_true")
     ap.add_argument("--refetch", action="store_true")
+    ap.add_argument("--geometry", choices=["new", "old"], default="new",
+                    help="'old' re-tests the main spec's 0.75/2.0 geometry on the fresh symbols")
     args = ap.parse_args()
-    cfg = followup_config()
+    cfg = followup_config(args.geometry)
 
     rows, pooled, v0p = run(cfg, args.synthetic, args.refetch)
-    verdict = report(rows, pooled, v0p, cfg,
-                     "SYNTHETIC random walk" if args.synthetic else "REAL DATA, fresh symbols")
+    tag = ("SYNTHETIC random walk" if args.synthetic
+           else f"REAL DATA, fresh symbols, {args.geometry.upper()} geometry")
+    verdict = report(rows, pooled, v0p, cfg, tag)
+
+    if args.geometry == "old" and not args.synthetic:
+        print("\n--- separating geometry effect from selection noise ---")
+        print("  original measurement (old geometry, BNB/ETH/SOL/DOGE): V3 - random = +4.14 pp")
+        print("  this run             (old geometry, fresh symbols)   : see 'V3 - random' above")
+        print("  follow-up            (new geometry, fresh symbols)   : V3 - random = -2.43 pp")
+        print("  Only the symbols differ between the first two, so a lift that replicates")
+        print("  points at a real but geometry-bound effect; a lift near zero points at")
+        print("  selection noise in the original best-of-four pick.")
 
     if args.synthetic:
         print("\n--- falsification check ---")
