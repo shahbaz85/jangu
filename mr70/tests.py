@@ -196,6 +196,61 @@ def test_signal_conditions_hold():
     print(f"ok  signal conditions hold for every variant {counts}")
 
 
+def test_paper_observer():
+    """The paper observer must: detect a signal, resolve both geometries, never
+    duplicate a signal across restarts, never invent a result for an unfilled
+    entry, and contain no order-placing code at all."""
+    import pandas as pd
+    from dataclasses import replace as _replace
+    import mr70.paper_live as pl
+
+    cfg = _replace(MR70Config(), symbols=["T/USDT:USDT"])
+    base = _climax_fixture(1, n=400, spike_at=320)
+    cols = list(base.columns)
+    ci = {k: cols.index(k) for k in cols}
+
+    def tape(fill: bool):
+        v = base.values.copy()
+        if fill:
+            v[321, ci["low"]] = 98.5
+            for k in range(322, 340):
+                v[k, ci["open"]], v[k, ci["close"]] = 99.5, 101.0
+                v[k, ci["high"]], v[k, ci["low"]] = 101.5, 99.4
+        else:                                   # gaps away, limit never trades
+            for k in range(321, 340):
+                v[k, ci["low"]], v[k, ci["open"]] = 100.5, 100.6
+                v[k, ci["close"]], v[k, ci["high"]] = 101.0, 101.5
+        return pd.DataFrame(v, index=base.index, columns=cols)
+
+    orig = pl.fetch_ohlcv
+    try:
+        pl.fetch_ohlcv = lambda *a, **k: tape(True)
+        st = {"symbols": {}}
+        sigs, trades, fwd = pl.process_symbol("T/USDT:USDT", cfg, st, True)
+        assert len(sigs) == 1, "observer missed the climax signal"
+        assert len(trades) == len(pl.GEOMETRIES), "both geometries must be reported"
+        assert all(t["status"] == "tp" for t in trades), "engineered rally should hit TP"
+        assert all(t["R_net"] < t["R_gross"] for t in trades), "costs must reduce net R"
+        assert len(fwd) == pl.FORWARD_BARS, "forward bars not captured for re-analysis"
+
+        again, _, _ = pl.process_symbol("T/USDT:USDT", cfg, st, False)
+        assert not again, "same signal logged twice across a restart"
+
+        pl.fetch_ohlcv = lambda *a, **k: tape(False)
+        st2 = {"symbols": {}}
+        _, unf, _ = pl.process_symbol("T/USDT:USDT", cfg, st2, True)
+        assert all(t["status"] == "unfilled" for t in unf), "entry should not have filled"
+        assert not any("R_net" in t for t in unf), "unfilled entry must not produce a result"
+    finally:
+        pl.fetch_ohlcv = orig
+
+    src = (pathlib.Path(pl.__file__)).read_text()
+    banned = ("create_order", "apiKey", "secret", "private_", "place_order")
+    found = [w for w in banned if w in src]
+    assert not found, f"paper observer contains order-capable code: {found}"
+    print("ok  paper observer: signals, both geometries, restart-safe, no order code")
+
+
 if __name__ == "__main__":
     test_atr_matches_wilder()
     test_rsi_bounds()
@@ -206,3 +261,4 @@ if __name__ == "__main__":
     test_no_lookahead()
     test_v3_fires_on_a_real_climax()
     test_signal_conditions_hold()
+    test_paper_observer()

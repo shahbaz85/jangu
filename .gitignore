@@ -9,3 +9,8 @@ sent_signals.json
 signal_journal.csv
 news.csv
 *_15m.csv
+
+# MR-70 paper observer output
+mr70/paper_state.json
+mr70/paper_*.csv
+mr70/_t_*
