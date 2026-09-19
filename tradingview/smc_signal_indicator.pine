@@ -350,7 +350,7 @@ h1EqMid = h1Lo + h1Rng / 2
 // LONG build
 // =============================================================================
 buildLong = trkActiveLong and (baseEvent == 1 or baseEvent == 2)
-var string lastRejectLong = ""
+lastRejectLong = ""
 if buildLong
     tExtreme = trkExtremeLong
     tExternal = trkExternalLong
@@ -499,7 +499,7 @@ if buildLong
 // SHORT build (mirror of LONG)
 // =============================================================================
 buildShort = trkActiveShort and (baseEvent == -1 or baseEvent == -2)
-var string lastRejectShort = ""
+lastRejectShort = ""
 if buildShort
     tExtreme = trkExtremeShort
     tExternal = trkExternalShort
