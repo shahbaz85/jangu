@@ -75,8 +75,7 @@ bearFvg = high < low[2] and (low[2] - high) >= fvgMinATR * atrVal
 
 hourUTC = hour(time, "UTC") + minute(time, "UTC") / 60.0
 inKZ = (hourUTC >= londonStart and hourUTC < londonEnd) or (hourUTC >= nyStart and hourUTC < nyEnd)
-inSweepWindow = (hourUTC >= math.max(0.0, londonStart - sweepPreKZ) and hourUTC < londonEnd) or
-                (hourUTC >= math.max(0.0, nyStart - sweepPreKZ) and hourUTC < nyEnd)
+inSweepWindow = (hourUTC >= math.max(0.0, londonStart - sweepPreKZ) and hourUTC < londonEnd) or (hourUTC >= math.max(0.0, nyStart - sweepPreKZ) and hourUTC < nyEnd)
 inAsia = hourUTC >= asiaStart and hourUTC < asiaEnd
 afterAsia = hourUTC >= asiaEnd
 
@@ -482,11 +481,7 @@ if buildLong
                                     lastRejectLong := "score_too_low"
                                 else
                                     lastRejectLong := ""
-                                    lbl = "LONG " + grade + " (" + str.tostring(score) + " pts)\n" +
-                                          "Entry " + poi + ": " + str.tostring(entryPx, format.mintick) + "\n" +
-                                          "SL: " + str.tostring(stopPx, format.mintick) + "\n" +
-                                          "TP1: " + str.tostring(tp1Px, format.mintick) + "\n" +
-                                          "TP2: " + str.tostring(tp2Px, format.mintick) + " (" + str.tostring(rr, "#.##") + "R)"
+                                    lbl = "LONG " + grade + " (" + str.tostring(score) + " pts)\nEntry " + poi + ": " + str.tostring(entryPx, format.mintick) + "\nSL: " + str.tostring(stopPx, format.mintick) + "\nTP1: " + str.tostring(tp1Px, format.mintick) + "\nTP2: " + str.tostring(tp2Px, format.mintick) + " (" + str.tostring(rr, "#.##") + "R)"
                                     label.new(bar_index, low - atrVal, lbl, style=label.style_label_up, color=color.new(color.green, 20), textcolor=color.white, size=size.small)
                                     line.new(bar_index, entryPx, bar_index + 8, entryPx, color=color.green, width=1)
                                     line.new(bar_index, stopPx, bar_index + 8, stopPx, color=color.red, width=1)
@@ -626,11 +621,7 @@ if buildShort
                                     lastRejectShort := "score_too_low"
                                 else
                                     lastRejectShort := ""
-                                    lbl = "SHORT " + grade + " (" + str.tostring(score) + " pts)\n" +
-                                          "Entry " + poi + ": " + str.tostring(entryPx, format.mintick) + "\n" +
-                                          "SL: " + str.tostring(stopPx, format.mintick) + "\n" +
-                                          "TP1: " + str.tostring(tp1Px, format.mintick) + "\n" +
-                                          "TP2: " + str.tostring(tp2Px, format.mintick) + " (" + str.tostring(rr, "#.##") + "R)"
+                                    lbl = "SHORT " + grade + " (" + str.tostring(score) + " pts)\nEntry " + poi + ": " + str.tostring(entryPx, format.mintick) + "\nSL: " + str.tostring(stopPx, format.mintick) + "\nTP1: " + str.tostring(tp1Px, format.mintick) + "\nTP2: " + str.tostring(tp2Px, format.mintick) + " (" + str.tostring(rr, "#.##") + "R)"
                                     label.new(bar_index, high + atrVal, lbl, style=label.style_label_down, color=color.new(color.red, 20), textcolor=color.white, size=size.small)
                                     line.new(bar_index, entryPx, bar_index + 8, entryPx, color=color.red, width=1)
                                     line.new(bar_index, stopPx, bar_index + 8, stopPx, color=color.red, width=1)
