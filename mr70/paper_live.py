@@ -64,6 +64,20 @@ FEATURE_SNAPSHOT = ["atr", "rsi", "rsi_fast", "vwap", "vwap_dev", "vwap_sd", "vo
                     "ema200_4h", "trend_4h", "ema_base", "bb_lo", "bb_hi"]
 
 
+def fetch_with_retry(symbol: str, days: int, cfg, attempts: int = 5):
+    """Binance rate-limits after heavy pulls; a bare failure silently skips a symbol."""
+    delay = 2
+    for k in range(attempts):
+        try:
+            return fetch_ohlcv(symbol, "15m", days, cfg.exchange_id)
+        except Exception as e:
+            if k == attempts - 1:
+                raise
+            print(f"  {symbol}: fetch failed ({type(e).__name__}), retry in {delay}s", flush=True)
+            time.sleep(delay)
+            delay *= 2
+
+
 def notify(text: str):
     print(text, flush=True)
     token, chat = os.getenv("TELEGRAM_BOT_TOKEN"), os.getenv("TELEGRAM_CHAT_ID")
@@ -100,7 +114,7 @@ def _new_trade(sig_id, symbol, i, d, f, cfg):
         "signal_time": str(f["close_time"].iloc[i]),
         "entry": entry, "atr": atr,
         "filled": False, "fill_time": None, "bars_waited": 0, "bars_since_fill": 0,
-        "forward": [],
+        "forward": [], "source": "live",
         "features": {k: (None if pd.isna(f[k].iloc[i]) else float(f[k].iloc[i]))
                      for k in FEATURE_SNAPSHOT},
         "geo": {},
@@ -169,7 +183,8 @@ def _flush_rows(rec, cfg):
     """Turn a finished record into trade rows (one per geometry) plus forward bars."""
     trades, fwd = [], []
     for name, g in rec["geo"].items():
-        row = {"id": rec["id"], "geometry": name, "symbol": rec["symbol"],
+        row = {"id": rec["id"], "geometry": name, "source": rec.get("source", "live"),
+               "symbol": rec["symbol"],
                "side": rec["side"], "signal_time": rec["signal_time"],
                "entry": rec["entry"], "atr": rec["atr"],
                "filled": rec["filled"], "fill_time": rec["fill_time"],
@@ -191,9 +206,14 @@ def _flush_rows(rec, cfg):
     return trades, fwd
 
 
-def process_symbol(symbol: str, cfg: MR70Config, st: dict, first_run: bool):
+def process_symbol(symbol: str, cfg: MR70Config, st: dict, first_run: bool,
+                   backfill: bool = False):
+    """first_run warms state from history. Those signals are NOT forward
+    observations -- they re-derive candles the backtest already saw -- so unless
+    --backfill is asked for they are used only to set the watermark, keeping the
+    logged sample genuinely out of sample."""
     days = WARMUP_DAYS if first_run else max(REFRESH_DAYS, 1)
-    df = fetch_ohlcv(symbol, "15m", days, cfg.exchange_id)
+    df = fetch_with_retry(symbol, days, cfg)
     if df.empty:
         return [], [], []
     f = build_features(df, cfg)
@@ -202,6 +222,10 @@ def process_symbol(symbol: str, cfg: MR70Config, st: dict, first_run: bool):
     sym_state = st["symbols"].setdefault(symbol, {"last_ts": None, "live": []})
     last_ts = sym_state["last_ts"]
     times = [str(t) for t in f["close_time"]]
+
+    if first_run and not backfill:
+        sym_state["last_ts"] = times[-1] if times else None
+        return [], [], []
 
     start = 0
     if last_ts is not None and last_ts in times:
@@ -240,13 +264,19 @@ def process_symbol(symbol: str, cfg: MR70Config, st: dict, first_run: bool):
     return new_signals, trades, fwd
 
 
-def cycle(cfg: MR70Config, st: dict):
-    first_run = not st["symbols"]
+def cycle(cfg: MR70Config, st: dict, backfill: bool = False):
     for symbol in cfg.symbols:
-        try:
-            sigs, trades, fwd = process_symbol(symbol, cfg, st, first_run)
+        first_run = symbol not in st["symbols"]      # per symbol, so a failed
+        try:                                          # symbol still starts clean later
+            sigs, trades, fwd = process_symbol(symbol, cfg, st, first_run, backfill)
         except Exception as e:
             print(f"{symbol}: error {e}", flush=True)
+            save_state(st)
+            continue
+        if first_run and not backfill:
+            print(f"  {symbol}: watermark set at {st['symbols'][symbol]['last_ts']} "
+                  f"(history not logged; forward signals only)", flush=True)
+            save_state(st)
             continue
         append_csv(SIGNALS_CSV, sigs)
         append_csv(TRADES_CSV, trades)
@@ -264,6 +294,9 @@ def cycle(cfg: MR70Config, st: dict):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--once", action="store_true")
+    ap.add_argument("--backfill", action="store_true",
+                    help="also log historical signals on a symbol's first run "
+                         "(NOT forward out-of-sample data -- keep it separate)")
     args = ap.parse_args()
     cfg = replace(MR70Config(),
                   symbols=["BTC/USDT:USDT", "AVAX/USDT:USDT", "XRP/USDT:USDT", "ADA/USDT:USDT"],
@@ -272,7 +305,7 @@ def main():
     notify("MR70 V3 paper observer started (signals only, never places orders): "
            + ", ".join(s.split("/")[0] for s in cfg.symbols))
     while True:
-        cycle(cfg, st)
+        cycle(cfg, st, args.backfill)
         if args.once:
             break
         now = time.time()
