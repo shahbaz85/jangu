@@ -79,8 +79,7 @@ inSweepWindow = (hourUTC >= math.max(0.0, londonStart - sweepPreKZ) and hourUTC 
 inAsia = hourUTC >= asiaStart and hourUTC < asiaEnd
 afterAsia = hourUTC >= asiaEnd
 
-if showKillzones
-    bgcolor(inKZ ? color.new(color.blue, 92) : na, title="Kill zone")
+bgcolor(showKillzones and inKZ ? color.new(color.blue, 92) : na, title="Kill zone")
 
 // ---------------- Market structure (BOS/CHoCH) ----------------
 f_marketStructure(n) =>
@@ -306,9 +305,8 @@ else if not na(eqhOut) and high > eqhOut and eqhOut > close
     sweepShortName := "EQUAL_HIGHS"
     sweepShortExternal := false
 
-if showSweeps and inSweepWindow
-    plotshape(not na(sweepLongLevel), title="Sweep low", style=shape.triangleup, location=location.belowbar, color=color.lime, size=size.tiny)
-    plotshape(not na(sweepShortLevel), title="Sweep high", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.tiny)
+plotshape(showSweeps and inSweepWindow and not na(sweepLongLevel), title="Sweep low", style=shape.triangleup, location=location.belowbar, color=color.lime, size=size.tiny)
+plotshape(showSweeps and inSweepWindow and not na(sweepShortLevel), title="Sweep high", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.tiny)
 
 // ---------------- Sweep trackers (one per direction) ----------------
 var bool   trkActiveLong = false
