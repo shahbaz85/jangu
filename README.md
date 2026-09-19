@@ -104,3 +104,27 @@ different setup definition (broader sweep detection, a longer confirmation
 window, a market-order entry instead of a limit order to fix the low fill
 rate) or a much longer/broader dataset to validate at this level of
 selectivity.
+
+## trend_config.py / trend_engine.py / trend_backtest.py: findings
+
+A second, unrelated strategy: a 4H EMA(21/55) trend filter plus a 15m
+pullback-to-EMA(20) reclaim entry, fixed ATR stop, tested both with a fixed 2R
+target and with a trailing stop after TP1 (`trend_backtest.py --trailing`).
+Unlike the SMC strategy, this fires often -- built specifically to answer the
+low-frequency problem above.
+
+On 730 days of real BTC 15m data:
+
+- **Fixed R:R:** 1,364 trades, 47.1% win rate, expectancy -0.218R, profit
+  factor 0.66, -82.3% return.
+- **Trailing stop:** 1,386 trades, 46.9% win rate, expectancy -0.239R, profit
+  factor 0.63, -85.6% return -- slightly worse, not better.
+
+Both are large, statistically solid samples (not a sample-size problem like
+the SMC strategy). The trailing-stop test specifically ruled out "the fixed
+target caps winners" as the cause. **Conclusion:** the entry signal itself
+(price reclaiming a 20-EMA in a moderately-trending 4H regime) has no
+measurable edge on BTC -- a plausible reason is that it's a well-known,
+widely-traded pattern on a highly liquid, closely-watched asset. Not
+recommended for live capital. `pool_symbols.py --strategy trend` is available
+to test it across more symbols if that's ever worth revisiting.
