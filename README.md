@@ -72,3 +72,35 @@ Compare `signal_journal.csv` with what the backtest would have done over the sam
 - Open interest and funding only exist live, so the live scoring can differ slightly from the backtest.
 - The code was tested on synthetic random-walk data for correctness, not for profitability. Expect **low signal frequency** with the default filters: this is a selective strategy. Your real-data backtest decides whether it has an edge.
 - The correlation guard in live is advisory: it warns rather than blocks.
+
+## Real-data findings (2024–2026, 8 symbols)
+
+The strategy was backtested against real Binance USDT-M 15m data, 730 days, on
+BTC/ETH/BNB/SOL/XRP/ADA/DOGE/AVAX, with the config defaults as coded (no
+cherry-picked thresholds). See `pool_symbols.py`.
+
+- **Setup frequency is very low.** Only 17 signals reached full scoring across
+  all 8 symbols combined over 2 years (~1 per symbol per year). This held on
+  every symbol tested individually too, not just BTC.
+- **Fill rate is low.** Only 5 of those 17 (29%) actually filled as trades; the
+  rest were pending limit orders (entry at the FVG midpoint/OB edge) that
+  expired or were cancelled before price retraced to them.
+- **Pooled result on the 5 that filled:** 20% win rate, expectancy -0.818R,
+  profit factor 0.12, net -4.09R. Too small a sample to prove the strategy
+  loses money, but no evidence of positive edge either.
+- Aggressively loosening the single biggest bottleneck
+  (`displacement_body_atr` down to 0.7, vs the 1.5 default) on BTC and BNB
+  individually still only produced 3-4 trades per symbol over 2 years --
+  confirming the low frequency isn't a threshold-tuning problem. It's
+  structural to how rarely this specific sweep-then-structure-break pattern
+  occurs at 15m within the London/NY kill zone hours, on these symbols.
+
+**Conclusion:** as currently specified, this rule set has not shown validated
+edge and is not recommended for live capital. The engine/backtest/live
+infrastructure held up well throughout this testing (deterministic,
+no-lookahead, walk-forward-capable) and is reusable for a different strategy.
+A future attempt at this specific idea would need either a materially
+different setup definition (broader sweep detection, a longer confirmation
+window, a market-order entry instead of a limit order to fix the low fill
+rate) or a much longer/broader dataset to validate at this level of
+selectivity.
