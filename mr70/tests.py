@@ -107,6 +107,95 @@ def test_adx_range():
     print("ok  ADX within 0-100")
 
 
+def _climax_fixture(direction: int, n: int = 400, spike_at: int = 320):
+    """Flat, low-volume tape with one deliberate climax candle: a volume spike that
+    closes far from VWAP with a long rejection wick. Used to prove V3's code path
+    fires -- synthetic() has uniform volume and can never trigger a 3x climax."""
+    idx = pd.date_range("2025-03-01", periods=n, freq="15min", tz="UTC")
+    rng = np.random.default_rng(1)
+    close = 100 + rng.normal(0, 0.02, n)
+    o = close + rng.normal(0, 0.01, n)
+    h = np.maximum(o, close) + 0.02
+    l = np.minimum(o, close) - 0.02
+    vol = np.full(n, 100.0)
+    if direction == 1:                      # capitulation low: deep wick, closes below VWAP
+        l[spike_at] = 90.0
+        close[spike_at] = 99.0
+        o[spike_at] = 100.0
+        h[spike_at] = 100.2
+    else:                                   # blow-off high: mirror
+        h[spike_at] = 110.0
+        close[spike_at] = 101.0
+        o[spike_at] = 100.0
+        l[spike_at] = 99.8
+    # 5x the average: comfortably past the 3x gate, but NOT so large that the candle's
+    # own volume drags session VWAP onto itself and cancels its own deviation --
+    # a real effect in V3, strongest early in the UTC day (see step 2 notes)
+    vol[spike_at] = 500.0
+    return pd.DataFrame({"open": o, "high": h, "low": l, "close": close, "volume": vol}, index=idx)
+
+
+def test_v3_fires_on_a_real_climax():
+    cfg = MR70Config()
+    from mr70.signals import v3_vwap_climax
+    for d in (1, -1):
+        f = build_features(_climax_fixture(d), cfg)
+        sig = v3_vwap_climax(f, cfg)
+        assert sig, f"V3 did not fire on a deliberate {'long' if d == 1 else 'short'} climax"
+        assert all(s[1] == d for s in sig), "V3 fired in the wrong direction on the climax"
+    print("ok  V3 fires on a constructed volume climax (code path verified)")
+
+
+def test_signal_conditions_hold():
+    """Every variant must actually satisfy its own definition at the bars it fires,
+    in the direction it claims. Catches inverted logic, which would otherwise show
+    up as a fake edge."""
+    from mr70.signals import VARIANTS, valid_mask
+    cfg = MR70Config()
+    df = synthetic(days=200, seed=11)
+    f = build_features(df, cfg)
+    v = valid_mask(f)
+    c, t = f["close"].to_numpy(), f["trend_4h"].to_numpy()
+    counts = {}
+
+    for name, fn in VARIANTS.items():
+        sig = fn(f, cfg)
+        counts[name] = len(sig)
+        assert all(v[i] for i, _ in sig), f"{name} fired on a bar with missing features"
+        assert list(sig) == sorted(sig), f"{name} signals not chronological"
+
+    for i, d in VARIANTS["V1"](f, cfg):
+        assert f["adx_1h"].iloc[i] < cfg.adx_max
+        if d == 1:
+            assert c[i] < f["bb_lo"].iloc[i] and f["rsi"].iloc[i] < cfg.rsi_low
+        else:
+            assert c[i] > f["bb_hi"].iloc[i] and f["rsi"].iloc[i] > cfg.rsi_high
+
+    for i, d in VARIANTS["V2"](f, cfg):
+        assert t[i] == d, "V2 traded against its own 4H trend filter"
+        if d == 1:
+            assert f["rsi_fast"].iloc[i] < cfg.rsi2_low and c[i] > f["ema_base"].iloc[i]
+        else:
+            assert f["rsi_fast"].iloc[i] > cfg.rsi2_high and c[i] < f["ema_base"].iloc[i]
+
+    for i, d in VARIANTS["V3"](f, cfg):
+        assert f["volume"].iloc[i] > cfg.vol_mult * f["vol_avg"].iloc[i]
+        dev, sd = f["vwap_dev"].iloc[i], f["vwap_sd"].iloc[i]
+        if d == 1:
+            assert dev < -cfg.vwap_k * sd, "V3 long did not fire below VWAP stretch"
+            assert f["lower_wick"].iloc[i] >= cfg.wick_frac
+        else:
+            assert dev > cfg.vwap_k * sd, "V3 short did not fire above VWAP stretch"
+            assert f["upper_wick"].iloc[i] >= cfg.wick_frac
+
+    v3 = set(VARIANTS["V3"](f, cfg))
+    for s in VARIANTS["V4"](f, cfg):
+        assert s in v3, "V4 fired where V3 did not"
+        assert t[s[0]] == s[1], "V4 traded against the 4H trend"
+
+    print(f"ok  signal conditions hold for every variant {counts}")
+
+
 if __name__ == "__main__":
     test_atr_matches_wilder()
     test_rsi_bounds()
@@ -115,3 +204,5 @@ if __name__ == "__main__":
     test_vwap_resets_daily()
     test_htf_not_early()
     test_no_lookahead()
+    test_v3_fires_on_a_real_climax()
+    test_signal_conditions_hold()
