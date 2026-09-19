@@ -9,17 +9,18 @@ R (risk-normalized return per trade) is comparable across symbols, so pooling it
 valid -- the "equity"/drawdown columns are NOT (each symbol's backtest independently
 assumes its own $10k starting capital), so this script deliberately doesn't pool those.
 
+Works for either strategy: pass --strategy smc (default) or --strategy trend.
+
 Usage:
   python pool_symbols.py --symbols BTC/USDT:USDT ETH/USDT:USDT BNB/USDT:USDT SOL/USDT:USDT XRP/USDT:USDT ADA/USDT:USDT DOGE/USDT:USDT AVAX/USDT:USDT --days 730
+  python pool_symbols.py --strategy trend --symbols BTC/USDT:USDT ETH/USDT:USDT --days 730
 """
 import argparse
 import json
 
 import pandas as pd
 
-from config import Config
 from data import fetch_ohlcv, load_csv, save_csv
-from backtest import run_backtest
 
 
 def cache_path(symbol):
@@ -31,7 +32,14 @@ def main():
     ap.add_argument("--symbols", nargs="+", required=True)
     ap.add_argument("--days", type=int, default=730)
     ap.add_argument("--refetch", action="store_true", help="ignore cached CSVs and re-fetch")
+    ap.add_argument("--strategy", choices=["smc", "trend"], default="smc")
     args = ap.parse_args()
+    if args.strategy == "trend":
+        from trend_config import TrendConfig as Config
+        from trend_backtest import run_trend_backtest as run_backtest
+    else:
+        from config import Config
+        from backtest import run_backtest
     cfg = Config()
 
     all_trades = []

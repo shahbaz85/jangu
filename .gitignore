@@ -4,6 +4,7 @@ __pycache__/
 
 # generated at runtime / backtest time, not source
 trades.csv
+trend_trades.csv
 sent_signals.json
 signal_journal.csv
 news.csv
