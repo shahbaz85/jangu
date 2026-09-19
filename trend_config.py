@@ -26,6 +26,7 @@ class TrendConfig:
     tp1_r: float = 1.0
     tp1_close_frac: float = 0.5
     move_sl_to_be_after_tp1: bool = True
+    trail_atr_mult: float = 2.5     # only used by simulate_trend()'s --trailing mode
     order_valid_bars: int = 6
     max_bars_in_trade: int = 96
     cancel_if_price_reaches: str = "tp2"
