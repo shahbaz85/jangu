@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+
+# generated at runtime / backtest time, not source
+trades.csv
+sent_signals.json
+signal_journal.csv
+news.csv
+*_15m.csv
