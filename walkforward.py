@@ -15,10 +15,11 @@ from config import Config
 from backtest import run_backtest
 
 GRID = {
-    "displacement_body_atr": [1.2, 1.5],
-    "max_sl_atr": [1.5, 2.0],
+    "displacement_body_atr": [1.0, 1.2, 1.5],
+    "max_sl_atr": [2.0, 2.5, 3.0],
     "entry_mode": ["fvg_mid", "ob_top"],
     "require_premium_discount": [True, False],
+    "allow_counter_trend": [False, True],
 }
 WARMUP_DAYS = 25   # history fed before each window so indicators/ATR percentile are warmed up
 
