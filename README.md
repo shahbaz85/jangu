@@ -170,3 +170,48 @@ target to raise the win rate makes the cost drag worse, not better.
 Per the spec, the backtest (step 4/5) was not run on any variant, since none
 passed the gate. V3 was the most consistent across symbols (70.1-74.8%) and is
 the only one worth revisiting if the geometry were changed.
+
+### V3 follow-up (fresh symbols, larger geometry) — FAIL
+
+Pre-registered in `MR70_V3_FOLLOWUP.md`: V3 unchanged, run only on symbols it had
+never seen (BTC, AVAX, XRP, ADA), with TP 1.5 / SL 3.0 ATR and a 32-bar time stop,
+against an absolute cost-aware break-even instead of the +4 pp rule. See
+`mr70/v3_followup.py`.
+
+| symbol | trades | hit | required | margin |
+|---|---|---|---|---|
+| BTC | 177 | 53.7% | 69.4% | −15.77 pp |
+| AVAX | 203 | 58.6% | 68.7% | −10.05 pp |
+| XRP | 202 | 60.9% | 68.7% | −7.83 pp |
+| ADA | 199 | 55.8% | 68.5% | −12.70 pp |
+
+Pooled: **781 trades, hit rate 57.36%**, Wilson 95% CI [53.87%, 60.79%], required
+68.81%. Margin on the Wilson lower bound **−14.94 pp**. Beat the bar on **0 of 4**
+symbols. **VERDICT: FAIL**, by a wide margin, not a marginal miss.
+
+**V3 came in 2.43 pp BELOW random entry** (57.36% vs 59.79% on 12,509 control
+trades) — a sign reversal from the +4.14 pp it showed at the original 0.75/2.0
+geometry on the original symbols.
+
+Why the bar sits where it does, decomposed:
+
+- theoretical random, no time stop, no costs: 66.67%
+- observed random: 59.79% → the **32-bar time stop costs 6.88 pp**, truncating
+  11.7% of trades of which roughly 59% would otherwise have won
+- costs add a further 2.14 pp → required 68.81%
+- so breaking even needs **+9.02 pp over random**; V3 delivers −2.43 pp
+
+**Biggest weakness:** V3's edge, to whatever extent it was ever real, lives only at
+short horizons and small targets — exactly where fixed costs are proportionally
+largest. Widen the target so costs become affordable and the edge disappears
+entirely. That is a squeeze, not a tuning problem: the edge exists where it cannot
+be traded profitably, and vanishes where it could be.
+
+**Honest caveat:** the follow-up changed two things at once — fresh symbols *and* a
+larger geometry. So the reversal cannot be attributed to geometry alone; part of
+the original +4.14 pp may simply have been selection noise (V3 was the best of four
+variants) that failed to replicate out of sample. Both readings are consistent with
+this data, and both are negative for V3.
+
+Per the addendum, the backtest was not run and no other geometries, thresholds or
+symbols were tried.
