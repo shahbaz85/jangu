@@ -215,3 +215,50 @@ this data, and both are negative for V3.
 
 Per the addendum, the backtest was not run and no other geometries, thresholds or
 symbols were tried.
+
+### V3: old geometry on fresh symbols — separating geometry from selection noise
+
+Requested explicitly to resolve the confound in the follow-up (which varied
+symbols *and* geometry together). Run with
+`mr70/v3_followup.py --geometry old`.
+
+Completed 2x2, V3 lift over the V0 random control:
+
+| | old symbols (BNB/ETH/SOL/DOGE) | fresh symbols (BTC/AVAX/XRP/ADA) |
+|---|---|---|
+| **old geometry** 0.75/2.0, 16 bars | +4.14 pp | **+3.40 pp** |
+| **new geometry** 1.5/3.0, 32 bars | — | −2.43 pp |
+
+**Geometry effect: confirmed.** The two fresh-symbol cells differ only in
+geometry — same symbols, same signal — so +3.40 pp vs −2.43 pp isolates it with
+no selection confound. V3's edge is real at short horizons and inverts when the
+target is widened.
+
+**Selection noise: largely but not conclusively ruled out.** +4.14 → +3.40 pp on
+entirely unseen symbols is only 0.74 pp of regression; a best-of-four winner's
+curse would decay harder. But at 364 trades the lift's 95% CI is [−1.30, +8.10],
+which spans zero, so it is not independently significant.
+
+**Gate result: FAIL anyway.** Pooled 364 trades, hit 72.80%, Wilson lower bound
+68.01% against a required 74.83%; 1 of 4 symbols beat the bar.
+
+| geometry | edge needed over random | delivered | shortfall |
+|---|---|---|---|
+| 0.75/2.0 | +5.43 pp | +3.40 pp | −2.03 pp |
+| 1.5/3.0 | +9.02 pp | −2.43 pp | −11.45 pp |
+
+**Definitive characterisation: V3's edge is real and is about 63% of the size
+needed to pay its own costs.**
+
+**Why no geometry fixes it — bracketed from both sides.** Shrink the target and
+fixed costs eat a larger share of each win: on BTC only 35 of 367 signals were
+even allowed to trade, the rest rejected by `tp_too_small_vs_fees`. Widen the
+target and the edge inverts to below random. There is no window where both hold.
+
+Secondary red flag: 22 pp spread across symbols (BTC 60.0%, ADA 69.1%, XRP 71.6%,
+AVAX 82.0%). Even at the favourable geometry it is not stable across instruments.
+
+Note on process: the pre-registered reading of this run was "lift >= +3 pp with CI
+above zero" for a real effect, "<= +2 pp" for noise. The actual +3.40 pp with a CI
+spanning zero fell in a gap between those branches, and is recorded as such rather
+than assigned to whichever branch suited the conclusion.
