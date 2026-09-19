@@ -25,17 +25,19 @@ def _combine(long: np.ndarray, short: np.ndarray):
 
 
 def v0_random(f, cfg):
-    """Baseline: random direction on random tradeable bars. Defines what the
-    TP/SL geometry alone yields with zero edge. Fixed seed."""
+    """Baseline: random direction, offered on every tradeable bar. Defines what the
+    TP/SL geometry alone yields with zero edge. Fixed seed.
+
+    Offering every eligible bar (rather than a random subset) maximises the control
+    sample once the caller's non-overlap rule thins it, which tightens the baseline
+    confidence interval. The baseline is a control, so estimating it as precisely as
+    possible is free: it cannot create an edge, it only removes noise from the
+    comparison. Direction remains random, which is the part that matters.
+    """
     rng = np.random.default_rng(cfg.seed)
     valid = np.flatnonzero(valid_mask(f))
-    if len(valid) == 0:
-        return []
-    n = min(cfg.random_samples_per_symbol, len(valid))
-    picks = rng.choice(valid, size=n, replace=False)
-    dirs = rng.choice(np.array([1, -1]), size=n)
-    order = np.argsort(picks)
-    return [(int(picks[j]), int(dirs[j])) for j in order]
+    dirs = rng.choice(np.array([1, -1]), size=len(valid))
+    return [(int(i), int(d)) for i, d in zip(valid, dirs)]
 
 
 def v1_bb_rsi(f, cfg):

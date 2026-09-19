@@ -67,7 +67,6 @@ class MR70Config:
 
     # --- edge gate ---
     gate_min_lift_pp: float = 4.0     # signal hit rate must beat random by >= 4 pp
-    random_samples_per_symbol: int = 3000
     seed: int = 7
 
     def slip_for(self, symbol: str) -> float:
