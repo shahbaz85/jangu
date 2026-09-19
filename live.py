@@ -3,6 +3,10 @@
 It only SENDS signals. It does not place orders. Keep it that way until paper trading
 confirms live signals match backtest behaviour.
 
+If this process was offline for a while (laptop asleep/off), it catches up on any
+signal formed during the gap that is still within its order-validity window when it
+comes back, instead of only ever looking at the newest candle.
+
 Setup:
   export TELEGRAM_BOT_TOKEN=...   (create a bot with @BotFather)
   export TELEGRAM_CHAT_ID=...     (your chat id, e.g. from @userinfobot)
@@ -87,16 +91,23 @@ def correlated_open(cfg, symbol, sent):
 
 
 def evaluate(cfg, ex, eng, sent):
+    now = None    # newest candle close time seen this pass, across symbols; anchors staleness pruning
     for symbol in cfg.symbols:
         try:
             df = fetch_ohlcv(symbol, "15m", days=26, exchange_id=cfg.exchange_id)
         except Exception as e:
             print(symbol, "fetch error:", e)
             continue
+        if df.empty:
+            continue
+        latest = df.index[-1] + pd.Timedelta(cfg.base_tf)   # close time of the newest candle we have
+        now = latest if now is None else max(now, latest)
         funding, oi_rising = market_context(ex, symbol)
-        signals, _, _ = eng.run(df, symbol, funding=funding, oi_rising=oi_rising, only_last=True)
+        signals, _, _ = eng.run(df, symbol, funding=funding, oi_rising=oi_rising)
         for sig in signals:
-            if sig["id"] in sent:
+            # skip ones already alerted, and ones whose order window has already expired
+            # (e.g. formed while this process was offline) rather than alerting on a dead order
+            if sig["id"] in sent or sig["valid_until"] < latest:
                 continue
             blocker = correlated_open(cfg, symbol, sent)
             sizing = position_size(cfg.account_equity, sig["risk_pct"], sig["entry"], sig["stop"], cfg)
@@ -109,6 +120,10 @@ def evaluate(cfg, ex, eng, sent):
                                        "tp1", "tp2", "rr_tp2", "risk_pct")}
             row["reasons"] = "; ".join(sig["reasons"])
             pd.DataFrame([row]).to_csv(JOURNAL, mode="a", header=not JOURNAL.exists(), index=False)
+    if now is not None:
+        stale = now - pd.Timedelta(days=1)
+        for k in [k for k, v in sent.items() if pd.Timestamp(v["valid_until"]) < stale]:
+            del sent[k]
     STATE.write_text(json.dumps(sent, indent=1))
 
 

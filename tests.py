@@ -61,6 +61,9 @@ def test_sizing():
 
 
 def test_live_pipeline():
+    """The live pipeline must catch the newest signal (even one formed while the process was
+    "offline", i.e. only visible once we jump straight to the full history) and must not
+    re-alert on a rerun of the same data."""
     import live
     cfg = Config(displacement_body_atr=1.0, max_sl_atr=3.0, allow_counter_trend=True,
                  require_premium_discount=False, grade_b=3, min_rr=1.5, symbols=["TEST"])
@@ -72,10 +75,11 @@ def test_live_pipeline():
     live.STATE = live.Path("/tmp/_sent.json"); live.JOURNAL = live.Path("/tmp/_journal.csv")
     sent = {}
     live.evaluate(cfg, None, SMCEngine(cfg), sent)
-    assert len(sent) == 1
-    live.evaluate(cfg, None, SMCEngine(cfg), sent)            # same candle again: no duplicate
-    assert len(sent) == 1
-    print("ok  live pipeline + dedup")
+    assert sigs[-1]["id"] in sent
+    n = len(sent)
+    live.evaluate(cfg, None, SMCEngine(cfg), sent)            # same data again: no duplicate
+    assert len(sent) == n
+    print(f"ok  live pipeline + dedup ({n} still-valid signal(s) caught)")
 
 
 if __name__ == "__main__":

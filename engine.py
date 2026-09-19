@@ -20,8 +20,8 @@ class SMCEngine:
         self.news = pd.DatetimeIndex(news_times if news_times is not None else [], tz="UTC")
 
     # ------------------------------------------------------------------ public
-    def run(self, df: pd.DataFrame, symbol: str = "", funding=None, oi_rising=None, only_last=False):
-        """Returns (signals, rejects, features). only_last=True: evaluate the latest bar only (live)."""
+    def run(self, df: pd.DataFrame, symbol: str = "", funding=None, oi_rising=None):
+        """Returns (signals, rejects, features)."""
         cfg = self.cfg
         f = build_features(df, cfg)
         self.f = f
@@ -49,12 +49,8 @@ class SMCEngine:
                             trackers[d] = tr = {"idx": i, "extreme": extreme, **sw}
                 if tr and np.sign(a["event"][i]) == d:
                     trackers[d] = None
-                    if only_last and i != N - 1:
-                        continue
                     res = self._build(i, d, tr, symbol, funding, oi_rising)
                     (signals if res["ok"] else rejects).append(res)
-        if only_last:
-            signals = [s for s in signals if s["idx"] == N - 1]
         return signals, rejects, f
 
     # ----------------------------------------------------------------- helpers
