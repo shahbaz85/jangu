@@ -4,6 +4,9 @@ The most important test is the lookahead check: features computed on data trunca
 must equal features computed on the full data for every bar <= k. If this ever fails after you
 edit features.py, your backtest is lying to you.
 """
+import tempfile
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 
@@ -72,7 +75,8 @@ def test_live_pipeline():
     k = sigs[-1]["idx"]
     live.fetch_ohlcv = lambda *a, **kw: df.iloc[:k + 1]      # pretend the signal candle just closed
     live.market_context = lambda ex, s: (0.0001, True)
-    live.STATE = live.Path("/tmp/_sent.json"); live.JOURNAL = live.Path("/tmp/_journal.csv")
+    tmp = Path(tempfile.gettempdir())
+    live.STATE = tmp / "_sent.json"; live.JOURNAL = tmp / "_journal.csv"
     sent = {}
     live.evaluate(cfg, None, SMCEngine(cfg), sent)
     assert sigs[-1]["id"] in sent
