@@ -358,6 +358,7 @@ if buildLong
     tExternal = trkExternalLong
     gap = bar_index - trkIdxLong
     trkActiveLong := false
+    reason = ""
 
     dispOk = false
     for k = 0 to math.min(2, gap)
@@ -365,128 +366,136 @@ if buildLong
             dispOk := true
     if not dispOk and gap >= 2
         allGreen = close[0] > open[0] and close[1] > open[1] and close[2] > open[2]
-        if allGreen
-            legHi = math.max(math.max(high[0], high[1]), high[2])
-            legLo = math.min(math.min(low[0], low[1]), low[2])
-            if (legHi - legLo) >= dispLegATR * atrVal
-                dispOk := true
-
+        legHi = math.max(math.max(high[0], high[1]), high[2])
+        legLo = math.min(math.min(low[0], low[1]), low[2])
+        if allGreen and (legHi - legLo) >= dispLegATR * atrVal
+            dispOk := true
     if not dispOk
-        lastRejectLong := "no_displacement"
-    else
-        fvgFound = false
-        fvgLo = float(na)
-        fvgHi = float(na)
-        for k = 0 to gap - 1
-            if not fvgFound and bullFvg[k]
-                zoneHi = high[k + 2]
-                zoneLo = low[k]
-                mid = (zoneHi + zoneLo) / 2
-                laterOk = true
-                for j = 0 to k - 1
-                    if low[j] <= mid
-                        laterOk := false
-                if laterOk
-                    fvgFound := true
-                    fvgHi := zoneHi
-                    fvgLo := zoneLo
+        reason := "no_displacement"
 
-        extOffset = 0
-        extLowVal = low
-        for k = 0 to gap
-            if low[k] < extLowVal
-                extLowVal := low[k]
-                extOffset := k
-        obFound = false
-        obLo = float(na)
-        obHi = float(na)
-        for k = extOffset to extOffset + 5
-            if not obFound and (close[k] - open[k]) < 0
-                obFound := true
-                obLo := low[k]
-                obHi := open[k]
+    fvgFound = false
+    fvgLo = float(na)
+    fvgHi = float(na)
+    for k = 0 to gap - 1
+        if not fvgFound and bullFvg[k]
+            zoneHi = high[k + 2]
+            zoneLo = low[k]
+            mid = (zoneHi + zoneLo) / 2
+            laterOk = true
+            for j = 0 to k - 1
+                if low[j] <= mid
+                    laterOk := false
+            if laterOk
+                fvgFound := true
+                fvgHi := zoneHi
+                fvgLo := zoneLo
 
-        entryPx = float(na)
-        poi = ""
-        if entryModeInp == "fvg_mid" and fvgFound
-            entryPx := (fvgHi + fvgLo) / 2
-            poi := "FVG"
-        else if obFound
-            entryPx := obHi
-            poi := "OB"
-        else if fvgFound
-            entryPx := (fvgHi + fvgLo) / 2
-            poi := "FVG"
+    extOffset = 0
+    extLowVal = low
+    for k = 0 to gap
+        if low[k] < extLowVal
+            extLowVal := low[k]
+            extOffset := k
+    obFound = false
+    obLo = float(na)
+    obHi = float(na)
+    for k = extOffset to extOffset + 5
+        if not obFound and (close[k] - open[k]) < 0
+            obFound := true
+            obLo := low[k]
+            obHi := open[k]
 
-        if na(entryPx)
-            lastRejectLong := "no_fvg_or_ob"
+    entryPx = float(na)
+    poi = ""
+    if reason == "" and entryModeInp == "fvg_mid" and fvgFound
+        entryPx := (fvgHi + fvgLo) / 2
+        poi := "FVG"
+    else if reason == "" and obFound
+        entryPx := obHi
+        poi := "OB"
+    else if reason == "" and fvgFound
+        entryPx := (fvgHi + fvgLo) / 2
+        poi := "FVG"
+    if reason == "" and na(entryPx)
+        reason := "no_fvg_or_ob"
+
+    stopPx = float(na)
+    riskPx = float(na)
+    if reason == ""
+        stopPx := tExtreme - slBufferATR * atrVal
+        riskPx := entryPx - stopPx
+        if riskPx <= 0
+            reason := "invalid_stop"
+        else if (close - entryPx) <= 0
+            reason := "entry_not_on_retrace_side"
+        else if riskPx > maxSLATR * atrVal
+            reason := "sl_too_wide"
+
+    tp2Px = float(na)
+    rr = float(na)
+    if reason == ""
+        tp2Cands = array.new_float(0)
+        if not na(pdh) and pdh > close
+            array.push(tp2Cands, pdh)
+        if not na(asiaH) and asiaH > close
+            array.push(tp2Cands, asiaH)
+        if not na(eqhOut) and eqhOut > close
+            array.push(tp2Cands, eqhOut)
+        if not na(h1Hi) and h1Hi > close
+            array.push(tp2Cands, h1Hi)
+        if array.size(tp2Cands) == 0
+            reason := "no_target_liquidity"
         else
-            stopPx = tExtreme - slBufferATR * atrVal
-            riskPx = entryPx - stopPx
-            if riskPx <= 0
-                lastRejectLong := "invalid_stop"
-            else if (close - entryPx) <= 0
-                lastRejectLong := "entry_not_on_retrace_side"
-            else if riskPx > maxSLATR * atrVal
-                lastRejectLong := "sl_too_wide"
-            else
-                tp2Cands = array.new_float(0)
-                if not na(pdh) and pdh > close
-                    array.push(tp2Cands, pdh)
-                if not na(asiaH) and asiaH > close
-                    array.push(tp2Cands, asiaH)
-                if not na(eqhOut) and eqhOut > close
-                    array.push(tp2Cands, eqhOut)
-                if not na(h1Hi) and h1Hi > close
-                    array.push(tp2Cands, h1Hi)
-                if array.size(tp2Cands) == 0
-                    lastRejectLong := "no_target_liquidity"
-                else
-                    tp2Px = array.min(tp2Cands)
-                    rr = (tp2Px - entryPx) / riskPx
-                    if rr < minRR
-                        lastRejectLong := "rr_too_low"
-                    else
-                        tp1RUsed = math.min(tp1RInput, 0.6 * rr)
-                        tp1Px = entryPx + tp1RUsed * riskPx
-                        runawayPx = cancelMode == "tp1" ? tp1Px : tp2Px
-                        if high >= runawayPx
-                            lastRejectLong := "move_already_hit_target"
-                        else if not inKZ
-                            lastRejectLong := "outside_killzone"
-                        else
-                            aligned = h4Trend == 1
-                            if not aligned and not allowCounter
-                                lastRejectLong := "against_4h_bias"
-                            else if not na(atrPct) and (atrPct < atrPctLow or atrPct > atrPctHigh)
-                                lastRejectLong := "volatility_filter"
-                            else if requirePD and not na(h1Rng) and h1Rng > 0 and entryPx >= h1EqMid
-                                lastRejectLong := "wrong_premium_discount"
-                            else
-                                score = 3
-                                if aligned
-                                    score += 2
-                                if tExternal
-                                    score += 2
-                                if fvgFound and obFound and math.max(fvgLo, obLo) <= math.min(fvgHi, obHi)
-                                    score += 1
-                                inOte = h1Rng > 0 and entryPx >= h1Hi - 0.79 * h1Rng and entryPx <= h1Hi - 0.62 * h1Rng
-                                if inOte
-                                    score += 1
-                                reactedH1 = not na(h1BullBot) and tExtreme >= h1BullBot - 0.25 * atrVal and tExtreme <= h1BullTop + 0.25 * atrVal
-                                if reactedH1
-                                    score += 1
-                                grade = score >= gradeAScore ? "A" : score >= gradeBScore ? "B" : "REJECT"
-                                if grade == "REJECT"
-                                    lastRejectLong := "score_too_low"
-                                else
-                                    lastRejectLong := ""
-                                    lbl = "LONG " + grade + " (" + str.tostring(score) + " pts)\nEntry " + poi + ": " + str.tostring(entryPx, format.mintick) + "\nSL: " + str.tostring(stopPx, format.mintick) + "\nTP1: " + str.tostring(tp1Px, format.mintick) + "\nTP2: " + str.tostring(tp2Px, format.mintick) + " (" + str.tostring(rr, "#.##") + "R)"
-                                    label.new(bar_index, low - atrVal, lbl, style=label.style_label_up, color=color.new(color.green, 20), textcolor=color.white, size=size.small)
-                                    line.new(bar_index, entryPx, bar_index + 8, entryPx, color=color.green, width=1)
-                                    line.new(bar_index, stopPx, bar_index + 8, stopPx, color=color.red, width=1)
-                                    line.new(bar_index, tp2Px, bar_index + 8, tp2Px, color=color.blue, width=1)
-                                    alert("SMC LONG " + grade + " " + syminfo.ticker + " entry=" + str.tostring(entryPx) + " sl=" + str.tostring(stopPx) + " tp1=" + str.tostring(tp1Px) + " tp2=" + str.tostring(tp2Px), alert.freq_once_per_bar_close)
+            tp2Px := array.min(tp2Cands)
+            rr := (tp2Px - entryPx) / riskPx
+            if rr < minRR
+                reason := "rr_too_low"
+
+    tp1Px = float(na)
+    if reason == ""
+        tp1RUsed = math.min(tp1RInput, 0.6 * rr)
+        tp1Px := entryPx + tp1RUsed * riskPx
+        runawayPx = cancelMode == "tp1" ? tp1Px : tp2Px
+        if high >= runawayPx
+            reason := "move_already_hit_target"
+        else if not inKZ
+            reason := "outside_killzone"
+
+    aligned = h4Trend == 1
+    if reason == ""
+        if not aligned and not allowCounter
+            reason := "against_4h_bias"
+        else if not na(atrPct) and (atrPct < atrPctLow or atrPct > atrPctHigh)
+            reason := "volatility_filter"
+        else if requirePD and not na(h1Rng) and h1Rng > 0 and entryPx >= h1EqMid
+            reason := "wrong_premium_discount"
+
+    if reason == ""
+        score = 3
+        if aligned
+            score += 2
+        if tExternal
+            score += 2
+        if fvgFound and obFound and math.max(fvgLo, obLo) <= math.min(fvgHi, obHi)
+            score += 1
+        inOte = h1Rng > 0 and entryPx >= h1Hi - 0.79 * h1Rng and entryPx <= h1Hi - 0.62 * h1Rng
+        if inOte
+            score += 1
+        reactedH1 = not na(h1BullBot) and tExtreme >= h1BullBot - 0.25 * atrVal and tExtreme <= h1BullTop + 0.25 * atrVal
+        if reactedH1
+            score += 1
+        grade = score >= gradeAScore ? "A" : score >= gradeBScore ? "B" : "REJECT"
+        if grade == "REJECT"
+            reason := "score_too_low"
+        else
+            lbl = "LONG " + grade + " (" + str.tostring(score) + " pts)\nEntry " + poi + ": " + str.tostring(entryPx, format.mintick) + "\nSL: " + str.tostring(stopPx, format.mintick) + "\nTP1: " + str.tostring(tp1Px, format.mintick) + "\nTP2: " + str.tostring(tp2Px, format.mintick) + " (" + str.tostring(rr, "#.##") + "R)"
+            label.new(bar_index, low - atrVal, lbl, style=label.style_label_up, color=color.new(color.green, 20), textcolor=color.white, size=size.small)
+            line.new(bar_index, entryPx, bar_index + 8, entryPx, color=color.green, width=1)
+            line.new(bar_index, stopPx, bar_index + 8, stopPx, color=color.red, width=1)
+            line.new(bar_index, tp2Px, bar_index + 8, tp2Px, color=color.blue, width=1)
+            alert("SMC LONG " + grade + " " + syminfo.ticker + " entry=" + str.tostring(entryPx) + " sl=" + str.tostring(stopPx) + " tp1=" + str.tostring(tp1Px) + " tp2=" + str.tostring(tp2Px), alert.freq_once_per_bar_close)
+
+    lastRejectLong := reason
 
 // =============================================================================
 // SHORT build (mirror of LONG)
@@ -498,6 +507,7 @@ if buildShort
     tExternal = trkExternalShort
     gap = bar_index - trkIdxShort
     trkActiveShort := false
+    reason = ""
 
     dispOk = false
     for k = 0 to math.min(2, gap)
@@ -505,128 +515,136 @@ if buildShort
             dispOk := true
     if not dispOk and gap >= 2
         allRed = close[0] < open[0] and close[1] < open[1] and close[2] < open[2]
-        if allRed
-            legHi = math.max(math.max(high[0], high[1]), high[2])
-            legLo = math.min(math.min(low[0], low[1]), low[2])
-            if (legHi - legLo) >= dispLegATR * atrVal
-                dispOk := true
-
+        legHi = math.max(math.max(high[0], high[1]), high[2])
+        legLo = math.min(math.min(low[0], low[1]), low[2])
+        if allRed and (legHi - legLo) >= dispLegATR * atrVal
+            dispOk := true
     if not dispOk
-        lastRejectShort := "no_displacement"
-    else
-        fvgFound = false
-        fvgLo = float(na)
-        fvgHi = float(na)
-        for k = 0 to gap - 1
-            if not fvgFound and bearFvg[k]
-                zoneHi = high[k]
-                zoneLo = low[k + 2]
-                mid = (zoneHi + zoneLo) / 2
-                laterOk = true
-                for j = 0 to k - 1
-                    if high[j] >= mid
-                        laterOk := false
-                if laterOk
-                    fvgFound := true
-                    fvgHi := zoneHi
-                    fvgLo := zoneLo
+        reason := "no_displacement"
 
-        extOffset = 0
-        extHighVal = high
-        for k = 0 to gap
-            if high[k] > extHighVal
-                extHighVal := high[k]
-                extOffset := k
-        obFound = false
-        obLo = float(na)
-        obHi = float(na)
-        for k = extOffset to extOffset + 5
-            if not obFound and (close[k] - open[k]) > 0
-                obFound := true
-                obLo := open[k]
-                obHi := high[k]
+    fvgFound = false
+    fvgLo = float(na)
+    fvgHi = float(na)
+    for k = 0 to gap - 1
+        if not fvgFound and bearFvg[k]
+            zoneHi = high[k]
+            zoneLo = low[k + 2]
+            mid = (zoneHi + zoneLo) / 2
+            laterOk = true
+            for j = 0 to k - 1
+                if high[j] >= mid
+                    laterOk := false
+            if laterOk
+                fvgFound := true
+                fvgHi := zoneHi
+                fvgLo := zoneLo
 
-        entryPx = float(na)
-        poi = ""
-        if entryModeInp == "fvg_mid" and fvgFound
-            entryPx := (fvgHi + fvgLo) / 2
-            poi := "FVG"
-        else if obFound
-            entryPx := obLo
-            poi := "OB"
-        else if fvgFound
-            entryPx := (fvgHi + fvgLo) / 2
-            poi := "FVG"
+    extOffset = 0
+    extHighVal = high
+    for k = 0 to gap
+        if high[k] > extHighVal
+            extHighVal := high[k]
+            extOffset := k
+    obFound = false
+    obLo = float(na)
+    obHi = float(na)
+    for k = extOffset to extOffset + 5
+        if not obFound and (close[k] - open[k]) > 0
+            obFound := true
+            obLo := open[k]
+            obHi := high[k]
 
-        if na(entryPx)
-            lastRejectShort := "no_fvg_or_ob"
+    entryPx = float(na)
+    poi = ""
+    if reason == "" and entryModeInp == "fvg_mid" and fvgFound
+        entryPx := (fvgHi + fvgLo) / 2
+        poi := "FVG"
+    else if reason == "" and obFound
+        entryPx := obLo
+        poi := "OB"
+    else if reason == "" and fvgFound
+        entryPx := (fvgHi + fvgLo) / 2
+        poi := "FVG"
+    if reason == "" and na(entryPx)
+        reason := "no_fvg_or_ob"
+
+    stopPx = float(na)
+    riskPx = float(na)
+    if reason == ""
+        stopPx := tExtreme + slBufferATR * atrVal
+        riskPx := stopPx - entryPx
+        if riskPx <= 0
+            reason := "invalid_stop"
+        else if (entryPx - close) <= 0
+            reason := "entry_not_on_retrace_side"
+        else if riskPx > maxSLATR * atrVal
+            reason := "sl_too_wide"
+
+    tp2Px = float(na)
+    rr = float(na)
+    if reason == ""
+        tp2Cands = array.new_float(0)
+        if not na(pdl) and pdl < close
+            array.push(tp2Cands, pdl)
+        if not na(asiaL) and asiaL < close
+            array.push(tp2Cands, asiaL)
+        if not na(eqlOut) and eqlOut < close
+            array.push(tp2Cands, eqlOut)
+        if not na(h1Lo) and h1Lo < close
+            array.push(tp2Cands, h1Lo)
+        if array.size(tp2Cands) == 0
+            reason := "no_target_liquidity"
         else
-            stopPx = tExtreme + slBufferATR * atrVal
-            riskPx = stopPx - entryPx
-            if riskPx <= 0
-                lastRejectShort := "invalid_stop"
-            else if (entryPx - close) <= 0
-                lastRejectShort := "entry_not_on_retrace_side"
-            else if riskPx > maxSLATR * atrVal
-                lastRejectShort := "sl_too_wide"
-            else
-                tp2Cands = array.new_float(0)
-                if not na(pdl) and pdl < close
-                    array.push(tp2Cands, pdl)
-                if not na(asiaL) and asiaL < close
-                    array.push(tp2Cands, asiaL)
-                if not na(eqlOut) and eqlOut < close
-                    array.push(tp2Cands, eqlOut)
-                if not na(h1Lo) and h1Lo < close
-                    array.push(tp2Cands, h1Lo)
-                if array.size(tp2Cands) == 0
-                    lastRejectShort := "no_target_liquidity"
-                else
-                    tp2Px = array.max(tp2Cands)
-                    rr = (entryPx - tp2Px) / riskPx
-                    if rr < minRR
-                        lastRejectShort := "rr_too_low"
-                    else
-                        tp1RUsed = math.min(tp1RInput, 0.6 * rr)
-                        tp1Px = entryPx - tp1RUsed * riskPx
-                        runawayPx = cancelMode == "tp1" ? tp1Px : tp2Px
-                        if low <= runawayPx
-                            lastRejectShort := "move_already_hit_target"
-                        else if not inKZ
-                            lastRejectShort := "outside_killzone"
-                        else
-                            aligned = h4Trend == -1
-                            if not aligned and not allowCounter
-                                lastRejectShort := "against_4h_bias"
-                            else if not na(atrPct) and (atrPct < atrPctLow or atrPct > atrPctHigh)
-                                lastRejectShort := "volatility_filter"
-                            else if requirePD and not na(h1Rng) and h1Rng > 0 and entryPx <= h1EqMid
-                                lastRejectShort := "wrong_premium_discount"
-                            else
-                                score = 3
-                                if aligned
-                                    score += 2
-                                if tExternal
-                                    score += 2
-                                if fvgFound and obFound and math.max(fvgLo, obLo) <= math.min(fvgHi, obHi)
-                                    score += 1
-                                inOte = h1Rng > 0 and entryPx >= h1Lo + 0.62 * h1Rng and entryPx <= h1Lo + 0.79 * h1Rng
-                                if inOte
-                                    score += 1
-                                reactedH1 = not na(h1BearBot) and tExtreme >= h1BearBot - 0.25 * atrVal and tExtreme <= h1BearTop + 0.25 * atrVal
-                                if reactedH1
-                                    score += 1
-                                grade = score >= gradeAScore ? "A" : score >= gradeBScore ? "B" : "REJECT"
-                                if grade == "REJECT"
-                                    lastRejectShort := "score_too_low"
-                                else
-                                    lastRejectShort := ""
-                                    lbl = "SHORT " + grade + " (" + str.tostring(score) + " pts)\nEntry " + poi + ": " + str.tostring(entryPx, format.mintick) + "\nSL: " + str.tostring(stopPx, format.mintick) + "\nTP1: " + str.tostring(tp1Px, format.mintick) + "\nTP2: " + str.tostring(tp2Px, format.mintick) + " (" + str.tostring(rr, "#.##") + "R)"
-                                    label.new(bar_index, high + atrVal, lbl, style=label.style_label_down, color=color.new(color.red, 20), textcolor=color.white, size=size.small)
-                                    line.new(bar_index, entryPx, bar_index + 8, entryPx, color=color.red, width=1)
-                                    line.new(bar_index, stopPx, bar_index + 8, stopPx, color=color.red, width=1)
-                                    line.new(bar_index, tp2Px, bar_index + 8, tp2Px, color=color.blue, width=1)
-                                    alert("SMC SHORT " + grade + " " + syminfo.ticker + " entry=" + str.tostring(entryPx) + " sl=" + str.tostring(stopPx) + " tp1=" + str.tostring(tp1Px) + " tp2=" + str.tostring(tp2Px), alert.freq_once_per_bar_close)
+            tp2Px := array.max(tp2Cands)
+            rr := (entryPx - tp2Px) / riskPx
+            if rr < minRR
+                reason := "rr_too_low"
+
+    tp1Px = float(na)
+    if reason == ""
+        tp1RUsed = math.min(tp1RInput, 0.6 * rr)
+        tp1Px := entryPx - tp1RUsed * riskPx
+        runawayPx = cancelMode == "tp1" ? tp1Px : tp2Px
+        if low <= runawayPx
+            reason := "move_already_hit_target"
+        else if not inKZ
+            reason := "outside_killzone"
+
+    aligned = h4Trend == -1
+    if reason == ""
+        if not aligned and not allowCounter
+            reason := "against_4h_bias"
+        else if not na(atrPct) and (atrPct < atrPctLow or atrPct > atrPctHigh)
+            reason := "volatility_filter"
+        else if requirePD and not na(h1Rng) and h1Rng > 0 and entryPx <= h1EqMid
+            reason := "wrong_premium_discount"
+
+    if reason == ""
+        score = 3
+        if aligned
+            score += 2
+        if tExternal
+            score += 2
+        if fvgFound and obFound and math.max(fvgLo, obLo) <= math.min(fvgHi, obHi)
+            score += 1
+        inOte = h1Rng > 0 and entryPx >= h1Lo + 0.62 * h1Rng and entryPx <= h1Lo + 0.79 * h1Rng
+        if inOte
+            score += 1
+        reactedH1 = not na(h1BearBot) and tExtreme >= h1BearBot - 0.25 * atrVal and tExtreme <= h1BearTop + 0.25 * atrVal
+        if reactedH1
+            score += 1
+        grade = score >= gradeAScore ? "A" : score >= gradeBScore ? "B" : "REJECT"
+        if grade == "REJECT"
+            reason := "score_too_low"
+        else
+            lbl = "SHORT " + grade + " (" + str.tostring(score) + " pts)\nEntry " + poi + ": " + str.tostring(entryPx, format.mintick) + "\nSL: " + str.tostring(stopPx, format.mintick) + "\nTP1: " + str.tostring(tp1Px, format.mintick) + "\nTP2: " + str.tostring(tp2Px, format.mintick) + " (" + str.tostring(rr, "#.##") + "R)"
+            label.new(bar_index, high + atrVal, lbl, style=label.style_label_down, color=color.new(color.red, 20), textcolor=color.white, size=size.small)
+            line.new(bar_index, entryPx, bar_index + 8, entryPx, color=color.red, width=1)
+            line.new(bar_index, stopPx, bar_index + 8, stopPx, color=color.red, width=1)
+            line.new(bar_index, tp2Px, bar_index + 8, tp2Px, color=color.blue, width=1)
+            alert("SMC SHORT " + grade + " " + syminfo.ticker + " entry=" + str.tostring(entryPx) + " sl=" + str.tostring(stopPx) + " tp1=" + str.tostring(tp1Px) + " tp2=" + str.tostring(tp2Px), alert.freq_once_per_bar_close)
+
+    lastRejectShort := reason
 
 // ---------------- Alertconditions (for TradingView's Create Alert dialog) ----------------
 alertcondition(buildLong and lastRejectLong == "", title="SMC Long Signal", message="SMC LONG signal on {{ticker}} at {{close}}")
