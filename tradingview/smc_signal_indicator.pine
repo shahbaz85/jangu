@@ -1,0 +1,642 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0
+//@version=5
+indicator("SMC 15m Signal Engine", shorttitle="SMC-15m", overlay=true, max_lines_count=500, max_labels_count=500, max_boxes_count=500, max_bars_back=2000)
+
+// =============================================================================
+// Ported from the Python engine (features.py + engine.py + risk.py in the repo).
+// Run this on a 15-MINUTE chart of a USDT-M perpetual (e.g. BINANCE:BTCUSDT.P).
+//
+// Known simplifications vs the Python backtest (documented, not hidden):
+//   - No open-interest or funding-rate factor (not reliably available on every
+//     chart feed) -> scoring never adds the "OI rising"/funding-crowded checks.
+//   - No news-blackout filter (no news feed inside Pine).
+//   - ATR percentile uses ta.percentrank, which is a different implementation
+//     from pandas' rolling rank(pct=True) -> values will be close, not identical.
+//   - HTF (1H/4H) values are read via request.security with lookahead_off,
+//     which is the correct no-repaint setting, but exact bar-close timing can
+//     still differ slightly from the Python's merge_asof-on-close-time logic.
+// Treat the Python backtest as the source of truth for validating the
+// strategy; use this indicator to see/alert on the same setups visually.
+// =============================================================================
+
+// ---------------- Inputs (mirror config.py) ----------------
+g_struct = "Structure"
+fractalN        = input.int(3, "Fractal swing lookback (15m)", group=g_struct)
+fractalNHTF     = input.int(2, "Fractal swing lookback (1H/4H)", group=g_struct)
+atrLen          = input.int(14, "ATR length", group=g_struct)
+dispBodyATR     = input.float(1.5, "Displacement body >= x*ATR", step=0.1, group=g_struct)
+dispLegATR      = input.float(2.0, "Displacement leg (3 candles) >= x*ATR", step=0.1, group=g_struct)
+fvgMinATR       = input.float(0.2, "Min FVG size (x*ATR)", step=0.05, group=g_struct)
+eqTolATR        = input.float(0.1, "Equal highs/lows tolerance (x*ATR)", step=0.05, group=g_struct)
+h1RangeBars     = input.int(48, "1H dealing range (bars)", group=g_struct)
+h1FvgMaxAge     = input.int(48, "1H FVG max age (bars)", group=g_struct)
+
+g_sess = "Sessions (UTC hours)"
+londonStart = input.float(7.0, "London start", group=g_sess)
+londonEnd   = input.float(10.0, "London end", group=g_sess)
+nyStart     = input.float(12.5, "New York start", group=g_sess)
+nyEnd       = input.float(15.5, "New York end", group=g_sess)
+sweepPreKZ  = input.float(1.0, "Sweep window before KZ (hours)", group=g_sess)
+asiaStart   = input.float(0.0, "Asia start", group=g_sess)
+asiaEnd     = input.float(6.0, "Asia end", group=g_sess)
+
+g_timing = "Setup timing"
+chochWindow    = input.int(8, "Structure-break window after sweep (bars)", group=g_timing)
+
+g_entry = "Entry / Exit"
+entryModeInp = input.string("fvg_mid", "Entry mode", options=["fvg_mid", "ob_top"], group=g_entry)
+slBufferATR  = input.float(0.1, "SL buffer (x*ATR)", step=0.05, group=g_entry)
+minRR        = input.float(2.0, "Min RR to TP2", step=0.1, group=g_entry)
+maxSLATR     = input.float(2.0, "Max SL (x*ATR)", step=0.1, group=g_entry)
+tp1RInput    = input.float(2.0, "TP1 (R, capped at 60% of TP2)", group=g_entry)
+cancelMode   = input.string("tp2", "Cancel pending order if price reaches", options=["tp2", "tp1"], group=g_entry)
+
+g_filt = "Filters"
+requirePD     = input.bool(true, "Require premium/discount", group=g_filt)
+allowCounter  = input.bool(false, "Allow counter-trend (vs 4H)", group=g_filt)
+atrPctLen     = input.int(1920, "ATR percentile window (bars, ~20d)", group=g_filt)
+atrPctLow     = input.float(20, "ATR percentile low (0-100)", group=g_filt)
+atrPctHigh    = input.float(95, "ATR percentile high (0-100)", group=g_filt)
+
+g_score = "Scoring"
+gradeAScore = input.int(8, "Grade A score", group=g_score)
+gradeBScore = input.int(6, "Grade B score", group=g_score)
+
+g_disp = "Display"
+showKillzones = input.bool(true, "Shade kill zones", group=g_disp)
+showSweeps    = input.bool(true, "Mark sweeps", group=g_disp)
+
+// ---------------- Basic series ----------------
+atrVal = ta.atr(atrLen)
+atrPct = ta.percentrank(atrVal, atrPctLen)   // 0-100 scale
+
+bullFvg = low > high[2] and (low - high[2]) >= fvgMinATR * atrVal
+bearFvg = high < low[2] and (low[2] - high) >= fvgMinATR * atrVal
+
+hourUTC = hour(time, "UTC") + minute(time, "UTC") / 60.0
+inKZ = (hourUTC >= londonStart and hourUTC < londonEnd) or (hourUTC >= nyStart and hourUTC < nyEnd)
+inSweepWindow = (hourUTC >= math.max(0.0, londonStart - sweepPreKZ) and hourUTC < londonEnd) or
+                (hourUTC >= math.max(0.0, nyStart - sweepPreKZ) and hourUTC < nyEnd)
+inAsia = hourUTC >= asiaStart and hourUTC < asiaEnd
+afterAsia = hourUTC >= asiaEnd
+
+if showKillzones
+    bgcolor(inKZ ? color.new(color.blue, 92) : na, title="Kill zone")
+
+// ---------------- Market structure (BOS/CHoCH) ----------------
+f_marketStructure(n) =>
+    var float curSH = na
+    var float curSL = na
+    var bool shLive = false
+    var bool slLive = false
+    var int trendState = 0
+    ph = ta.pivothigh(n, n)
+    pl = ta.pivotlow(n, n)
+    if not na(ph)
+        curSH := ph
+        shLive := true
+    if not na(pl)
+        curSL := pl
+        slLive := true
+    eventCode = 0
+    if shLive and close > curSH
+        eventCode := trendState == 1 ? 1 : 2
+        trendState := 1
+        shLive := false
+    else if slLive and close < curSL
+        eventCode := trendState == -1 ? -1 : -2
+        trendState := -1
+        slLive := false
+    [trendState, eventCode, curSH, curSL, ph, pl]
+
+[baseTrend, baseEvent, baseSH, baseSL, newSH, newSL] = f_marketStructure(fractalN)
+[h4Trend, h4Event, h4SH, h4SL, h4NewSH, h4NewSL] = request.security(syminfo.tickerid, "240", f_marketStructure(fractalNHTF), lookahead=barmerge.lookahead_off)
+
+// ---------------- 1H dealing range + 1H FVG zones ----------------
+f_h1Context(rangeBars, minAtrMult, maxAge) =>
+    a1 = ta.atr(14)
+    hi = ta.highest(high, rangeBars)
+    lo = ta.lowest(low, rangeBars)
+    bFvg = low > high[2] and (low - high[2]) >= minAtrMult * a1
+    sFvg = high < low[2] and (low[2] - high) >= minAtrMult * a1
+    var float bb = na
+    var float bt = na
+    var float sb = na
+    var float st = na
+    var int bAge = 0
+    var int sAge = 0
+    bAge := bAge + 1
+    sAge := sAge + 1
+    if bFvg
+        bb := high[2]
+        bt := low
+        bAge := 0
+    else if not na(bb) and (close < bb or bAge > maxAge)
+        bb := na
+        bt := na
+    if sFvg
+        sb := high
+        st := low[2]
+        sAge := 0
+    else if not na(st) and (close > st or sAge > maxAge)
+        sb := na
+        st := na
+    [hi, lo, bb, bt, sb, st]
+
+[h1Hi, h1Lo, h1BullBot, h1BullTop, h1BearBot, h1BearTop] = request.security(syminfo.tickerid, "60", f_h1Context(h1RangeBars, fvgMinATR, h1FvgMaxAge), lookahead=barmerge.lookahead_off)
+
+// ---------------- Daily liquidity: PDH/PDL with freshness ----------------
+dayId = year(time, "UTC") * 10000 + month(time, "UTC") * 100 + dayofmonth(time, "UTC")
+newDay = dayId != dayId[1]
+
+pdh = request.security(syminfo.tickerid, "1D", high[1], lookahead=barmerge.lookahead_off)
+pdl = request.security(syminfo.tickerid, "1D", low[1], lookahead=barmerge.lookahead_off)
+
+var float prevIntradayHigh = na
+var float prevIntradayLow = na
+freshPDH = newDay or na(prevIntradayHigh) or prevIntradayHigh <= pdh
+freshPDL = newDay or na(prevIntradayLow) or prevIntradayLow >= pdl
+prevIntradayHigh := newDay ? high : math.max(prevIntradayHigh, high)
+prevIntradayLow  := newDay ? low  : math.min(prevIntradayLow, low)
+
+// ---------------- Asia session range with freshness ----------------
+var float asiaHiToday = na
+var float asiaLoToday = na
+var float asiaHiFinal = na
+var float asiaLoFinal = na
+var float prevAsiaHiIntraday = na
+var float prevAsiaLoIntraday = na
+
+if newDay
+    asiaHiToday := na
+    asiaLoToday := na
+    asiaHiFinal := na
+    asiaLoFinal := na
+    prevAsiaHiIntraday := na
+    prevAsiaLoIntraday := na
+
+if inAsia
+    asiaHiToday := na(asiaHiToday) ? high : math.max(asiaHiToday, high)
+    asiaLoToday := na(asiaLoToday) ? low : math.min(asiaLoToday, low)
+
+if afterAsia and na(asiaHiFinal)
+    asiaHiFinal := asiaHiToday
+    asiaLoFinal := asiaLoToday
+
+asiaH = afterAsia ? asiaHiFinal : na
+asiaL = afterAsia ? asiaLoFinal : na
+freshAsiaH = afterAsia and (na(prevAsiaHiIntraday) or prevAsiaHiIntraday <= asiaH)
+freshAsiaL = afterAsia and (na(prevAsiaLoIntraday) or prevAsiaLoIntraday >= asiaL)
+if afterAsia
+    prevAsiaHiIntraday := na(prevAsiaHiIntraday) ? high : math.max(prevAsiaHiIntraday, high)
+    prevAsiaLoIntraday := na(prevAsiaLoIntraday) ? low : math.min(prevAsiaLoIntraday, low)
+
+// ---------------- Equal highs / equal lows ----------------
+var float[] actSH = array.new_float(0)
+var float[] actSL = array.new_float(0)
+var float[] eqhLevels = array.new_float(0)
+var float[] eqlLevels = array.new_float(0)
+
+eqhOut = float(na)
+eqlOut = float(na)
+if array.size(eqhLevels) > 0
+    minAbove = float(na)
+    for i = 0 to array.size(eqhLevels) - 1
+        v = array.get(eqhLevels, i)
+        if v > close[1]
+            minAbove := na(minAbove) ? v : math.min(minAbove, v)
+    eqhOut := minAbove
+if array.size(eqlLevels) > 0
+    maxBelow = float(na)
+    for i = 0 to array.size(eqlLevels) - 1
+        v = array.get(eqlLevels, i)
+        if v < close[1]
+            maxBelow := na(maxBelow) ? v : math.max(maxBelow, v)
+    eqlOut := maxBelow
+
+newEqh = array.new_float(0)
+for i = 0 to array.size(eqhLevels) - 1
+    v = array.get(eqhLevels, i)
+    if high <= v
+        array.push(newEqh, v)
+eqhLevels := newEqh
+newEql = array.new_float(0)
+for i = 0 to array.size(eqlLevels) - 1
+    v = array.get(eqlLevels, i)
+    if low >= v
+        array.push(newEql, v)
+eqlLevels := newEql
+
+newActSH = array.new_float(0)
+for i = 0 to array.size(actSH) - 1
+    v = array.get(actSH, i)
+    if high <= v
+        array.push(newActSH, v)
+actSH := newActSH
+newActSL = array.new_float(0)
+for i = 0 to array.size(actSL) - 1
+    v = array.get(actSL, i)
+    if low >= v
+        array.push(newActSL, v)
+actSL := newActSL
+
+if not na(newSH)
+    p = newSH
+    tolVal = eqTolATR * atrVal
+    matched = array.new_float(0)
+    array.push(matched, p)
+    for i = 0 to array.size(actSH) - 1
+        q = array.get(actSH, i)
+        if math.abs(p - q) <= tolVal
+            array.push(matched, q)
+    if array.size(matched) > 1
+        array.push(eqhLevels, array.max(matched))
+    array.push(actSH, p)
+    if array.size(actSH) > 30
+        array.shift(actSH)
+    if array.size(eqhLevels) > 30
+        array.shift(eqhLevels)
+
+if not na(newSL)
+    p = newSL
+    tolVal = eqTolATR * atrVal
+    matched = array.new_float(0)
+    array.push(matched, p)
+    for i = 0 to array.size(actSL) - 1
+        q = array.get(actSL, i)
+        if math.abs(p - q) <= tolVal
+            array.push(matched, q)
+    if array.size(matched) > 1
+        array.push(eqlLevels, array.min(matched))
+    array.push(actSL, p)
+    if array.size(actSL) > 30
+        array.shift(actSL)
+    if array.size(eqlLevels) > 30
+        array.shift(eqlLevels)
+
+// ---------------- Sweep detection ----------------
+sweepLongLevel = float(na)
+sweepLongName = ""
+sweepLongExternal = false
+if not na(pdl) and freshPDL and low < pdl and pdl < close
+    sweepLongLevel := pdl
+    sweepLongName := "PDL"
+    sweepLongExternal := true
+else if not na(asiaL) and freshAsiaL and low < asiaL and asiaL < close
+    sweepLongLevel := asiaL
+    sweepLongName := "ASIA_LOW"
+    sweepLongExternal := true
+else if not na(eqlOut) and low < eqlOut and eqlOut < close
+    sweepLongLevel := eqlOut
+    sweepLongName := "EQUAL_LOWS"
+    sweepLongExternal := false
+
+sweepShortLevel = float(na)
+sweepShortName = ""
+sweepShortExternal = false
+if not na(pdh) and freshPDH and high > pdh and pdh > close
+    sweepShortLevel := pdh
+    sweepShortName := "PDH"
+    sweepShortExternal := true
+else if not na(asiaH) and freshAsiaH and high > asiaH and asiaH > close
+    sweepShortLevel := asiaH
+    sweepShortName := "ASIA_HIGH"
+    sweepShortExternal := true
+else if not na(eqhOut) and high > eqhOut and eqhOut > close
+    sweepShortLevel := eqhOut
+    sweepShortName := "EQUAL_HIGHS"
+    sweepShortExternal := false
+
+if showSweeps and inSweepWindow
+    plotshape(not na(sweepLongLevel), title="Sweep low", style=shape.triangleup, location=location.belowbar, color=color.lime, size=size.tiny)
+    plotshape(not na(sweepShortLevel), title="Sweep high", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.tiny)
+
+// ---------------- Sweep trackers (one per direction) ----------------
+var bool   trkActiveLong = false
+var int    trkIdxLong = na
+var float  trkExtremeLong = na
+var string trkLevelNameLong = na
+var bool   trkExternalLong = false
+
+var bool   trkActiveShort = false
+var int    trkIdxShort = na
+var float  trkExtremeShort = na
+var string trkLevelNameShort = na
+var bool   trkExternalShort = false
+
+if trkActiveLong and (bar_index - trkIdxLong > chochWindow)
+    trkActiveLong := false
+if trkActiveShort and (bar_index - trkIdxShort > chochWindow)
+    trkActiveShort := false
+
+if inSweepWindow and not na(sweepLongLevel)
+    if not trkActiveLong or (low < trkExtremeLong)
+        trkActiveLong := true
+        trkIdxLong := bar_index
+        trkExtremeLong := low
+        trkLevelNameLong := sweepLongName
+        trkExternalLong := sweepLongExternal
+
+if inSweepWindow and not na(sweepShortLevel)
+    if not trkActiveShort or (high > trkExtremeShort)
+        trkActiveShort := true
+        trkIdxShort := bar_index
+        trkExtremeShort := high
+        trkLevelNameShort := sweepShortName
+        trkExternalShort := sweepShortExternal
+
+// ---------------- Filters shared by both directions ----------------
+h1Rng = h1Hi - h1Lo
+h1EqMid = h1Lo + h1Rng / 2
+
+// =============================================================================
+// LONG build
+// =============================================================================
+buildLong = trkActiveLong and (baseEvent == 1 or baseEvent == 2)
+var string lastRejectLong = ""
+if buildLong
+    tExtreme = trkExtremeLong
+    tExternal = trkExternalLong
+    gap = bar_index - trkIdxLong
+    trkActiveLong := false
+
+    dispOk = false
+    for k = 0 to math.min(2, gap)
+        if (close[k] - open[k]) >= dispBodyATR * atrVal
+            dispOk := true
+    if not dispOk and gap >= 2
+        allGreen = close[0] > open[0] and close[1] > open[1] and close[2] > open[2]
+        if allGreen
+            legHi = math.max(math.max(high[0], high[1]), high[2])
+            legLo = math.min(math.min(low[0], low[1]), low[2])
+            if (legHi - legLo) >= dispLegATR * atrVal
+                dispOk := true
+
+    if not dispOk
+        lastRejectLong := "no_displacement"
+    else
+        fvgFound = false
+        fvgLo = float(na)
+        fvgHi = float(na)
+        for k = 0 to gap - 1
+            if not fvgFound and bullFvg[k]
+                zoneHi = high[k + 2]
+                zoneLo = low[k]
+                mid = (zoneHi + zoneLo) / 2
+                laterOk = true
+                for j = 0 to k - 1
+                    if low[j] <= mid
+                        laterOk := false
+                if laterOk
+                    fvgFound := true
+                    fvgHi := zoneHi
+                    fvgLo := zoneLo
+
+        extOffset = 0
+        extLowVal = low
+        for k = 0 to gap
+            if low[k] < extLowVal
+                extLowVal := low[k]
+                extOffset := k
+        obFound = false
+        obLo = float(na)
+        obHi = float(na)
+        for k = extOffset to extOffset + 5
+            if not obFound and (close[k] - open[k]) < 0
+                obFound := true
+                obLo := low[k]
+                obHi := open[k]
+
+        entryPx = float(na)
+        poi = ""
+        if entryModeInp == "fvg_mid" and fvgFound
+            entryPx := (fvgHi + fvgLo) / 2
+            poi := "FVG"
+        else if obFound
+            entryPx := obHi
+            poi := "OB"
+        else if fvgFound
+            entryPx := (fvgHi + fvgLo) / 2
+            poi := "FVG"
+
+        if na(entryPx)
+            lastRejectLong := "no_fvg_or_ob"
+        else
+            stopPx = tExtreme - slBufferATR * atrVal
+            riskPx = entryPx - stopPx
+            if riskPx <= 0
+                lastRejectLong := "invalid_stop"
+            else if (close - entryPx) <= 0
+                lastRejectLong := "entry_not_on_retrace_side"
+            else if riskPx > maxSLATR * atrVal
+                lastRejectLong := "sl_too_wide"
+            else
+                tp2Cands = array.new_float(0)
+                if not na(pdh) and pdh > close
+                    array.push(tp2Cands, pdh)
+                if not na(asiaH) and asiaH > close
+                    array.push(tp2Cands, asiaH)
+                if not na(eqhOut) and eqhOut > close
+                    array.push(tp2Cands, eqhOut)
+                if not na(h1Hi) and h1Hi > close
+                    array.push(tp2Cands, h1Hi)
+                if array.size(tp2Cands) == 0
+                    lastRejectLong := "no_target_liquidity"
+                else
+                    tp2Px = array.min(tp2Cands)
+                    rr = (tp2Px - entryPx) / riskPx
+                    if rr < minRR
+                        lastRejectLong := "rr_too_low"
+                    else
+                        tp1RUsed = math.min(tp1RInput, 0.6 * rr)
+                        tp1Px = entryPx + tp1RUsed * riskPx
+                        runawayPx = cancelMode == "tp1" ? tp1Px : tp2Px
+                        if high >= runawayPx
+                            lastRejectLong := "move_already_hit_target"
+                        else if not inKZ
+                            lastRejectLong := "outside_killzone"
+                        else
+                            aligned = h4Trend == 1
+                            if not aligned and not allowCounter
+                                lastRejectLong := "against_4h_bias"
+                            else if not na(atrPct) and (atrPct < atrPctLow or atrPct > atrPctHigh)
+                                lastRejectLong := "volatility_filter"
+                            else if requirePD and not na(h1Rng) and h1Rng > 0 and entryPx >= h1EqMid
+                                lastRejectLong := "wrong_premium_discount"
+                            else
+                                score = 3
+                                if aligned
+                                    score += 2
+                                if tExternal
+                                    score += 2
+                                if fvgFound and obFound and math.max(fvgLo, obLo) <= math.min(fvgHi, obHi)
+                                    score += 1
+                                inOte = h1Rng > 0 and entryPx >= h1Hi - 0.79 * h1Rng and entryPx <= h1Hi - 0.62 * h1Rng
+                                if inOte
+                                    score += 1
+                                reactedH1 = not na(h1BullBot) and tExtreme >= h1BullBot - 0.25 * atrVal and tExtreme <= h1BullTop + 0.25 * atrVal
+                                if reactedH1
+                                    score += 1
+                                grade = score >= gradeAScore ? "A" : score >= gradeBScore ? "B" : "REJECT"
+                                if grade == "REJECT"
+                                    lastRejectLong := "score_too_low"
+                                else
+                                    lastRejectLong := ""
+                                    lbl = "LONG " + grade + " (" + str.tostring(score) + " pts)\n" +
+                                          "Entry " + poi + ": " + str.tostring(entryPx, format.mintick) + "\n" +
+                                          "SL: " + str.tostring(stopPx, format.mintick) + "\n" +
+                                          "TP1: " + str.tostring(tp1Px, format.mintick) + "\n" +
+                                          "TP2: " + str.tostring(tp2Px, format.mintick) + " (" + str.tostring(rr, "#.##") + "R)"
+                                    label.new(bar_index, low - atrVal, lbl, style=label.style_label_up, color=color.new(color.green, 20), textcolor=color.white, size=size.small)
+                                    line.new(bar_index, entryPx, bar_index + 8, entryPx, color=color.green, width=1)
+                                    line.new(bar_index, stopPx, bar_index + 8, stopPx, color=color.red, width=1)
+                                    line.new(bar_index, tp2Px, bar_index + 8, tp2Px, color=color.blue, width=1)
+                                    alert("SMC LONG " + grade + " " + syminfo.ticker + " entry=" + str.tostring(entryPx) + " sl=" + str.tostring(stopPx) + " tp1=" + str.tostring(tp1Px) + " tp2=" + str.tostring(tp2Px), alert.freq_once_per_bar_close)
+
+// =============================================================================
+// SHORT build (mirror of LONG)
+// =============================================================================
+buildShort = trkActiveShort and (baseEvent == -1 or baseEvent == -2)
+var string lastRejectShort = ""
+if buildShort
+    tExtreme = trkExtremeShort
+    tExternal = trkExternalShort
+    gap = bar_index - trkIdxShort
+    trkActiveShort := false
+
+    dispOk = false
+    for k = 0 to math.min(2, gap)
+        if (open[k] - close[k]) >= dispBodyATR * atrVal
+            dispOk := true
+    if not dispOk and gap >= 2
+        allRed = close[0] < open[0] and close[1] < open[1] and close[2] < open[2]
+        if allRed
+            legHi = math.max(math.max(high[0], high[1]), high[2])
+            legLo = math.min(math.min(low[0], low[1]), low[2])
+            if (legHi - legLo) >= dispLegATR * atrVal
+                dispOk := true
+
+    if not dispOk
+        lastRejectShort := "no_displacement"
+    else
+        fvgFound = false
+        fvgLo = float(na)
+        fvgHi = float(na)
+        for k = 0 to gap - 1
+            if not fvgFound and bearFvg[k]
+                zoneHi = high[k]
+                zoneLo = low[k + 2]
+                mid = (zoneHi + zoneLo) / 2
+                laterOk = true
+                for j = 0 to k - 1
+                    if high[j] >= mid
+                        laterOk := false
+                if laterOk
+                    fvgFound := true
+                    fvgHi := zoneHi
+                    fvgLo := zoneLo
+
+        extOffset = 0
+        extHighVal = high
+        for k = 0 to gap
+            if high[k] > extHighVal
+                extHighVal := high[k]
+                extOffset := k
+        obFound = false
+        obLo = float(na)
+        obHi = float(na)
+        for k = extOffset to extOffset + 5
+            if not obFound and (close[k] - open[k]) > 0
+                obFound := true
+                obLo := open[k]
+                obHi := high[k]
+
+        entryPx = float(na)
+        poi = ""
+        if entryModeInp == "fvg_mid" and fvgFound
+            entryPx := (fvgHi + fvgLo) / 2
+            poi := "FVG"
+        else if obFound
+            entryPx := obLo
+            poi := "OB"
+        else if fvgFound
+            entryPx := (fvgHi + fvgLo) / 2
+            poi := "FVG"
+
+        if na(entryPx)
+            lastRejectShort := "no_fvg_or_ob"
+        else
+            stopPx = tExtreme + slBufferATR * atrVal
+            riskPx = stopPx - entryPx
+            if riskPx <= 0
+                lastRejectShort := "invalid_stop"
+            else if (entryPx - close) <= 0
+                lastRejectShort := "entry_not_on_retrace_side"
+            else if riskPx > maxSLATR * atrVal
+                lastRejectShort := "sl_too_wide"
+            else
+                tp2Cands = array.new_float(0)
+                if not na(pdl) and pdl < close
+                    array.push(tp2Cands, pdl)
+                if not na(asiaL) and asiaL < close
+                    array.push(tp2Cands, asiaL)
+                if not na(eqlOut) and eqlOut < close
+                    array.push(tp2Cands, eqlOut)
+                if not na(h1Lo) and h1Lo < close
+                    array.push(tp2Cands, h1Lo)
+                if array.size(tp2Cands) == 0
+                    lastRejectShort := "no_target_liquidity"
+                else
+                    tp2Px = array.max(tp2Cands)
+                    rr = (entryPx - tp2Px) / riskPx
+                    if rr < minRR
+                        lastRejectShort := "rr_too_low"
+                    else
+                        tp1RUsed = math.min(tp1RInput, 0.6 * rr)
+                        tp1Px = entryPx - tp1RUsed * riskPx
+                        runawayPx = cancelMode == "tp1" ? tp1Px : tp2Px
+                        if low <= runawayPx
+                            lastRejectShort := "move_already_hit_target"
+                        else if not inKZ
+                            lastRejectShort := "outside_killzone"
+                        else
+                            aligned = h4Trend == -1
+                            if not aligned and not allowCounter
+                                lastRejectShort := "against_4h_bias"
+                            else if not na(atrPct) and (atrPct < atrPctLow or atrPct > atrPctHigh)
+                                lastRejectShort := "volatility_filter"
+                            else if requirePD and not na(h1Rng) and h1Rng > 0 and entryPx <= h1EqMid
+                                lastRejectShort := "wrong_premium_discount"
+                            else
+                                score = 3
+                                if aligned
+                                    score += 2
+                                if tExternal
+                                    score += 2
+                                if fvgFound and obFound and math.max(fvgLo, obLo) <= math.min(fvgHi, obHi)
+                                    score += 1
+                                inOte = h1Rng > 0 and entryPx >= h1Lo + 0.62 * h1Rng and entryPx <= h1Lo + 0.79 * h1Rng
+                                if inOte
+                                    score += 1
+                                reactedH1 = not na(h1BearBot) and tExtreme >= h1BearBot - 0.25 * atrVal and tExtreme <= h1BearTop + 0.25 * atrVal
+                                if reactedH1
+                                    score += 1
+                                grade = score >= gradeAScore ? "A" : score >= gradeBScore ? "B" : "REJECT"
+                                if grade == "REJECT"
+                                    lastRejectShort := "score_too_low"
+                                else
+                                    lastRejectShort := ""
+                                    lbl = "SHORT " + grade + " (" + str.tostring(score) + " pts)\n" +
+                                          "Entry " + poi + ": " + str.tostring(entryPx, format.mintick) + "\n" +
+                                          "SL: " + str.tostring(stopPx, format.mintick) + "\n" +
+                                          "TP1: " + str.tostring(tp1Px, format.mintick) + "\n" +
+                                          "TP2: " + str.tostring(tp2Px, format.mintick) + " (" + str.tostring(rr, "#.##") + "R)"
+                                    label.new(bar_index, high + atrVal, lbl, style=label.style_label_down, color=color.new(color.red, 20), textcolor=color.white, size=size.small)
+                                    line.new(bar_index, entryPx, bar_index + 8, entryPx, color=color.red, width=1)
+                                    line.new(bar_index, stopPx, bar_index + 8, stopPx, color=color.red, width=1)
+                                    line.new(bar_index, tp2Px, bar_index + 8, tp2Px, color=color.blue, width=1)
+                                    alert("SMC SHORT " + grade + " " + syminfo.ticker + " entry=" + str.tostring(entryPx) + " sl=" + str.tostring(stopPx) + " tp1=" + str.tostring(tp1Px) + " tp2=" + str.tostring(tp2Px), alert.freq_once_per_bar_close)
+
+// ---------------- Alertconditions (for TradingView's Create Alert dialog) ----------------
+alertcondition(buildLong and lastRejectLong == "", title="SMC Long Signal", message="SMC LONG signal on {{ticker}} at {{close}}")
+alertcondition(buildShort and lastRejectShort == "", title="SMC Short Signal", message="SMC SHORT signal on {{ticker}} at {{close}}")
