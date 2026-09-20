@@ -17,7 +17,7 @@ from data import synthetic
 from shared.config import ABConfig
 from shared.features import build_features, FEATURE_COLS
 from shared.indicators import market_structure, resample, stoch_rsi
-from shared.diagnostics import clustering_factor, trades_needed
+from shared.diagnostics import clustering_factor, trades_needed, zero_cost_breakeven
 from shared.strategy_b import cascade
 
 
@@ -126,6 +126,25 @@ def test_ablations_are_supersets():
     print(f"ok  ablations are supersets (full {full}, no-sweep {no_sweep}, no-zone {no_zone})")
 
 
+def test_zero_cost_breakeven():
+    """p = 1/(1.5+q). Anchored on the one case with an obvious answer: when half
+    the runners reach 2R, the scale-out is worth exactly what a plain 1:1 is, so
+    it breaks even at 50%. Worse runners demand a higher hit rate, better ones a
+    lower one."""
+    def outs(n_win, n_loss, n_tp2):
+        return ([{"win": True, "tp2": i < n_tp2} for i in range(n_win)]
+                + [{"win": False, "tp2": False} for _ in range(n_loss)])
+
+    q, be = zero_cost_breakeven(outs(100, 100, 50))
+    assert abs(q - 0.50) < 1e-9, f"runner conversion read as {q}"
+    assert abs(be - 0.50) < 1e-9, f"q=50% must break even at 50%, got {be:.4f}"
+    assert abs(zero_cost_breakeven(outs(100, 0, 0))[1] - 1 / 1.5) < 1e-9
+    assert zero_cost_breakeven(outs(100, 0, 90))[1] < be < zero_cost_breakeven(outs(100, 0, 10))[1], \
+        "break-even must fall as runner conversion rises"
+    assert np.isnan(zero_cost_breakeven(outs(0, 10, 0))[1]), "no winners means no estimate"
+    print(f"ok  zero-cost break-even: q=50% -> {be:.1%}, q=0% -> {1 / 1.5:.1%}")
+
+
 def test_trades_needed_matches_closed_form():
     """A textbook case, checked by hand: distinguishing 52.6% from 50.0% at 80%
     power and alpha 0.05 needs ~2,900 one-sample observations. The two-sample
@@ -164,5 +183,6 @@ if __name__ == "__main__":
     test_strategy_b_conditions_hold()
     test_ablations_are_supersets()
     test_no_lookahead()
+    test_zero_cost_breakeven()
     test_trades_needed_matches_closed_form()
     test_clustering_factor_sees_clustering()

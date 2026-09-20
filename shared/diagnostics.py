@@ -10,6 +10,7 @@ rejected and truncated signals can be observed, not traded.
   6.3  synthetic generator drift and long/short split      (runs with --synthetic)
   6.4  what the stop_too_wide rejects would have done under a generous horizon
   6.5  per-ablation hit rates, not just signal counts
+  3    zero-cost break-even per configuration, which no cost assumption can reach
   8.3  block-bootstrap intervals, which drop the independence assumption
   8.5  the trade count a given effect size actually needs
 
@@ -157,6 +158,29 @@ def clustering_factor(rows, shuffles=9, seed=23):
         widths.append(bhi - blo)
     null = float(np.median(widths))
     return actual, null, (actual / null if null > 0 else float("nan"))
+
+
+def zero_cost_breakeven(outs):
+    """The hit rate this exit needs when fees and slippage are set to zero.
+
+    A plain 1:1 target-and-stop breaks even at 50%. The spec does not trade that:
+    it closes half the position at TP1, moves the stop to entry, and runs the
+    remainder to 2R. Writing q for the share of winners whose runner reaches 2R,
+    a win returns 0.5 + q and a loss returns 1, so break-even solves
+
+        p(0.5 + q) = 1 - p     ->     p = 1 / (1.5 + q)
+
+    which is 50% only when q happens to be 50%. This matters because a hit rate
+    below its zero-cost line cannot be rescued by a better fee tier, a tighter
+    spread or a kinder slippage model -- there is no edge there to recover.
+
+    Returns (q, break_even) and (nan, nan) when nothing won.
+    """
+    wins = [o for o in outs if o["win"]]
+    if not wins:
+        return float("nan"), float("nan")
+    q = sum(bool(o["tp2"]) for o in wins) / len(wins)
+    return q, 1.0 / (1.5 + q)
 
 
 def trades_needed(p0: float, p1: float, power: float = 0.80, alpha: float = 0.05):
@@ -315,6 +339,31 @@ def main():
     for name, outs in ablations.items():
         print(hit_line(name, outs))
     print("\n  Reporting only. The spec forbids using an ablation to select anything.")
+
+    print("\n" + "=" * 78)
+    print(f"3  zero-cost break-even per configuration ({tag})")
+    print("=" * 78)
+    print(f"  {'configuration':<16} {'n':>5} {'hit':>7} {'Wilson 95%':>16} "
+          f"{'runner q':>9} {'zero-cost':>10} {'w/ costs':>9}  verdict")
+    for name, outs in ablations.items():
+        if not outs:
+            continue
+        n = len(outs)
+        w = sum(o["win"] for o in outs)
+        lo, hi = wilson(w, n)
+        q, be = zero_cost_breakeven(outs)
+        req = float(np.mean([o["required"] for o in outs]))
+        if hi < be:
+            verdict = "whole CI below zero-cost line"
+        elif w / n < be:
+            verdict = "point est. below, CI top above"
+        else:
+            verdict = "at or above zero-cost line"
+        print(f"  {name:<16} {n:>5} {w / n:>7.1%} {f'[{lo:.1%}, {hi:.1%}]':>16} "
+              f"{q:>9.1%} {be:>10.1%} {req:>9.1%}  {verdict}")
+    print("\n  'zero-cost' is 1/(1.5+q) for this configuration's own runner conversion.")
+    print("  A configuration below its own zero-cost line is not a marginal edge that")
+    print("  fees destroyed; it has no edge to destroy, and no fee tier reaches it.")
 
     print("\n" + "=" * 78)
     print(f"8.3  block-bootstrap intervals ({tag}, {BLOCK_DAYS}-day blocks, "
