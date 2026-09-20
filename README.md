@@ -262,3 +262,65 @@ Note on process: the pre-registered reading of this run was "lift >= +3 pp with 
 above zero" for a real effect, "<= +2 pp" for noise. The actual +3.40 pp with a CI
 spanning zero fell in a gap between those branches, and is recorded as such rather
 than assigned to whichever branch suited the conclusion.
+
+## shared/: Strategy A and Strategy B — gate results
+
+Pre-registered in `AB_STRATEGY_SPEC.md`. Both judged independently with a 95%
+two-sided Wilson bound (two hypotheses in one round). See `shared/run_gates.py`.
+
+**Both report INSUFFICIENT SAMPLE.** Neither reaches the 150-trade minimum, so
+per the spec no backtest was run.
+
+| | signals | trades | hit | required | Wilson 95% | verdict |
+|---|---|---|---|---|---|---|
+| A (EMA + StochRSI + volume + ABCD) | 95 | 6 | 33.3% | 54.1% | [9.7%, 70.0%] | insufficient |
+| B (SMC 4H→1H→30m→15m cascade) | 801 | 96 | 43.8% | 54.0% | [34.3%, 53.7%] | insufficient |
+
+**B's result is stronger than "insufficient" implies.** Its entire 95% interval
+(34.26–53.72%) lies *below* the cost-inclusive requirement of 53.96%. So B is not
+merely unmeasured: at 95% confidence its true hit rate is below what it needs to
+pay its own costs. It also came in 4.88 pp under a random control taken in the
+same 4H regime (48.63%, n=8276), though at n=96 that difference spans zero and is
+suggestive rather than proven.
+
+**A is genuinely unknown.** Six trades; the interval spans 9.7–70.0% and excludes
+nothing.
+
+### The binding constraint is the 2.5 ATR stop cap, for both
+
+| | signals | rejected `stop_too_wide` | tradeable |
+|---|---|---|---|
+| A | 95 | 89 (93.7%) | 6 |
+| B | 801 | 587 (73.3%) | 96 |
+
+Flagged before the run, from synthetic data, and worse on real data. For B the
+cause is a unit mismatch: the stop anchors to the **30m** sweep extreme while the
+cap is measured in **15m** ATR, and the break may arrive 8 bars after the sweep.
+Median stop distance is 3.88 ATR against a 2.5 cap.
+
+Recovering those rejected signals was tested as a diagnostic and **makes things
+worse**, because a wider stop pushes TP1 further away in price while the 96-bar
+time stop stays fixed, and an unresolved trade counts as a loss:
+
+| stop width | n | timed out | hit TP1 |
+|---|---|---|---|
+| ≤ 2.5 ATR (admitted) | 80 | 1.2% | 55.0% |
+| 2.5–4 ATR | 227 | 6.2% | 49.3% |
+| 4–6 ATR | 133 | 18.0% | 43.6% |
+| > 6 ATR | 181 | 64.1% | 16.0% |
+
+Admitting everything drops the pooled hit rate from 55.0% to 39.1%. The cap is
+selecting the only tradeable subset, not discarding good trades.
+
+### Other findings
+
+- **Strategy A's filters fight each other.** Breaking B is a breakout, so median
+  StochRSI %K at the trigger is 82.7 — already overbought — while the momentum
+  rule wants a fresh cross above 20 still under 80. Only 14.3% of break bars
+  satisfy both.
+- **Strategy B fires almost as often on random-walk data as on real data** (734
+  synthetic vs 801 real, +9%). A cascade genuinely reading market structure would
+  be expected to separate the two more than that.
+- Runner conversion P(2R | TP1) was 45.2% for B, so its scaled exit needs 51.2%
+  rather than the gate's 54.0% — the scale-out was less punishing here than
+  feared, but B clears neither number.
