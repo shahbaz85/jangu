@@ -1,22 +1,32 @@
-# Strategy B — findings, for designing a follow-up
+# Strategy B — findings (v3)
 
-Handoff note. Everything below was produced under `AB_STRATEGY_SPEC.md` with no
-tuning: thresholds were never changed, and the backtest was never run because the
-gate was never passed. Numbers marked **[real]** are from 730 days of Binance 15m
-data on BTC/ETH/SOL/DOGE. Numbers marked **[synthetic]** are from random-walk data
-and are indicative of *geometry*, not of edge.
+Handoff note for designing a follow-up. Produced under `AB_STRATEGY_SPEC.md` with no
+tuning: thresholds were never changed, and the backtest was never run because the gate
+was never passed.
+
+This supersedes v2. v2's central claim — that a fixed time stop was truncating trades
+and suppressing the hit rate — has been **measured on real data and falsified**. What
+replaced it is a cleaner and more negative result.
+
+**[real]** = 730 days of Binance 15m data, BTC/ETH/SOL/DOGE.
+**[synthetic]** = random-walk data from `data.synthetic()`, used as a no-edge control.
+
+Everything below marked as a diagnostic comes from `shared/diagnostics.py`, which is
+measurement only: it loosens the stop cap and the horizon so that rejected and
+truncated signals can be *observed*. No loosened setting feeds back into a
+pre-registered decision.
 
 ## 1. What was tested
 
-The four-level cascade exactly as specified: 4H market-structure trend → price
-tagging an unmitigated 1H displacement zone → a 30m sweep within 12×30m bars →
-a decisive 15m break of structure within 8 bars (body ≥60% of range and ≥1.2 ATR).
-Entry limit at the 15m FVG midpoint (else the break close), valid 8 bars. Stop
-beyond the 30m sweep extreme ±0.2 ATR(15m). TP1 1R closing 50% with the stop to
-breakeven, runner trailing 2.5 ATR. Time stop 96 bars. Rejections: stop >2.5 ATR
-(`stop_too_wide`) or <5× round-trip cost (`stop_too_tight_vs_fees`).
+The four-level cascade exactly as specified: 4H market-structure trend → price tagging
+an unmitigated 1H displacement zone → a 30m sweep within 12×30m bars → a decisive 15m
+break of structure within 8 bars (body ≥60% of range and ≥1.2 ATR). Entry limit at the
+15m FVG midpoint (else the break close), valid 8 bars. Stop beyond the 30m sweep extreme
+±0.2 ATR(15m). TP1 1R closing 50% with the stop to breakeven, runner trailing 2.5 ATR.
+Time stop 96 bars. Rejections: stop >2.5 ATR (`stop_too_wide`) or <5× round-trip cost
+(`stop_too_tight_vs_fees`).
 
-## 2. Result
+## 2. Gate result
 
 **[real]** Gate verdict: **INSUFFICIENT SAMPLE** — 96 trades against a 150 minimum.
 
@@ -30,114 +40,162 @@ breakeven, runner trailing 2.5 ATR. Time stop 96 bars. Rejections: stop >2.5 ATR
 | hit rate (TP1 before stop) | 43.75% |
 | Wilson 95% CI | [34.26%, 53.72%] |
 | required (cost-inclusive) | 53.96% |
-| random control, same 4H regime | 48.63% (n=8276) |
 | runner conversion P(2R \| TP1) | 45.2% |
 
-Two things are worth more than the verdict:
+How firmly to read it: the CI upper bound (53.72%) falls 0.24pp below the requirement
+(53.96%). That is a rounding accident, not a finding — treat this as *at* the break-even
+boundary, and note that the required rate is itself an estimate that moves with realised
+slippage. Per-symbol figures (BTC +3.51pp above required, ETH −27.70, SOL −5.66, DOGE
+−8.62) rest on ~24 trades each, i.e. intervals near ±20pp. Those symbols are **not
+distinguishable from one another**; the spread is what noise looks like at this sample
+size.
 
-- The **entire** confidence interval sits below the requirement (53.72 < 53.96).
-  On the 96 trades that were actually tested, B is not merely unmeasured — it is
-  below break-even with 95% confidence.
-- B underperformed its random control by 4.88 pp, though at n=96 that difference
-  spans zero and is suggestive only.
+The verdict is superseded by §3 and §4 regardless.
 
-Per-symbol was unstable: BTC +3.51 pp above required, ETH −27.70, SOL −5.66,
-DOGE −8.62. One of four beat its bar.
+## 3. The time-stop hypothesis is dead
 
-## 3. The central problem: a fixed time stop with a variable stop width
+v2 argued that a fixed 96-bar horizon against a stop width varying by 4× was truncating
+unresolved trades into losses, and that this suppressed the measured hit rate. It was a
+**[synthetic]**-only argument and v2 flagged it as a hypothesis. Measured:
 
-The stop anchors to the **30m** sweep extreme while the cap is measured in **15m**
-ATR, and the break can arrive 8 bars after the sweep. **[real]** median stop
-distance is 3.88 ATR against a 2.5 cap, p75 is 5.85. That is a unit mismatch, and
-it is why 73% of signals never traded.
+**[real]** exit-reason split of the 96 trades:
 
-The deeper issue is what happens to the ones that do. **[synthetic]** with the
-width cap lifted but the 96-bar time stop kept:
+| exit | n | share |
+|---|---|---|
+| TP1 (win) | 42 | 43.8% |
+| stop | 53 | 55.2% |
+| time stop | **1** | **1.0%** |
 
-| stop width | n | timed out | hit TP1 |
-|---|---|---|---|
-| ≤ 2.5 ATR | 80 | 1.2% | 55.0% |
-| 2.5–4 ATR | 227 | 6.2% | 49.3% |
-| 4–6 ATR | 133 | 18.0% | 43.6% |
-| > 6 ATR | 181 | 64.1% | 16.0% |
+One trade in 96. The 43.75% hit rate is 53 genuine stop-outs against 42 genuine wins.
+Truncation had essentially nothing to do with it, and **making the horizon proportional
+to stop width would not have changed the result.**
 
-That looks like wide stops being bad. They are not. With the **time stop also
-lifted**, so trades resolve naturally:
+The underlying geometry claim remains true and is worth keeping: on **[synthetic]** data
+with the cap lifted, resolution time scales as roughly 6 × (stop width in ATR)², which is
+what diffusion predicts, and the >6 ATR bucket does time out heavily (17%). It simply is
+not what happened to the traded subset, because the 2.5 ATR cap had already excluded
+every stop wide enough for it to matter. v2's §3 and §7.1 are therefore solving a
+problem that does not exist.
 
-| stop width | n | median bars | p75 | p90 | hit rate |
-|---|---|---|---|---|---|
-| ≤ 2.5 ATR | 65 | 13 | 31 | 56 | **55.4%** |
-| 2.5–4 ATR | 175 | 31 | 69 | 100 | **54.3%** |
-| 4–6 ATR | 103 | 67 | 147 | 414 | **54.4%** |
-| > 6 ATR | 148 | 195 | 436 | 983 | **47.3%** |
+## 4. The real finding: no measurable edge
 
-**The hit rate is essentially flat across stop widths once trades are allowed to
-finish.** The entire apparent degradation was the 96-bar limit truncating trades
-that had not yet resolved, which the spec counts as losses.
+Run the cascade with the stop cap and the fee floor lifted and the horizon at 500 bars,
+so the whole signal population resolves rather than the cap-selected 12%. Then run the
+identical code on random-walk data, where there is nothing to find by construction:
 
-Resolution time scales roughly as the **square** of stop width — 6 × width² fits
-the table well — which is what a diffusion process predicts (time ∝ distance²).
-A *fixed* time stop is therefore structurally mis-specified for a strategy whose
-stop width varies by a factor of four. 96 bars is adequate for a 2.5 ATR stop and
-far too short for a 5 ATR one.
+| | n | hit rate | Wilson 95% | required |
+|---|---|---|---|---|
+| **[real]** cascade | 581 | **51.1%** | [47.1%, 55.2%] | — |
+| **[synthetic]** cascade | 589 | **50.1%** | [46.1%, 54.1%] | 52.6% |
 
-## 4. What is already ruled out
+**Difference: +1.0pp, standard error 2.9pp, 95% CI [−4.7pp, +6.7pp].** Real market data
+gives this cascade nothing over a random walk.
 
-- **Simply widening the stop cap will not work.** Tested: admitting everything
-  under the current 96-bar limit drops the pooled hit rate from 55.0% to 39.1%.
-  Width and time have to move together or not at all.
-- **The scaled exit is not the problem here.** Runner conversion was 45.2%, so
-  the scale-out needs 51.2% versus the gate's 54.0% — slightly easier, not harder.
-  B clears neither.
-- **Signal frequency is not the problem.** 801 signals over 730 days on four
-  symbols is ample; the losses are all downstream of generation.
+That is a far stronger statement than the gate's "insufficient sample", because n=581 is
+not a small sample. The gate could not measure the strategy; this can, and it finds
+nothing.
 
-## 5. What is still genuinely unknown
+Two corollaries:
 
-**Whether Strategy B has any edge at all has not actually been measured.** 73% of
-its signals were rejected before being tested, and the surviving 12% were judged
-under a time limit suited only to the narrowest stops. The 43.75% hit rate is a
-measurement of the *cap-selected subset*, not of the strategy.
+- **The random control was never a fair baseline.** Under the same lifted settings the
+  regime-matched control resolves at 44.1% **[real]** and 42.6% **[synthetic]** — the
+  cascade leads it by 7.0pp on real data and 7.5pp on data with no edge in it. That gap
+  is *geometry* (a limit entry at the FVG midpoint against a stop anchored to the swept
+  extreme), not market reading. So v2's "B trailed its control by 4.88pp, no conclusion"
+  was reading a broken instrument. A follow-up must either build the control with the
+  cascade's own entry and stop construction, or drop the comparison.
+- **Widening the stop does not buy viability.** The required rate falls only from 53.96%
+  to 52.6% when the cap comes off, because cost-to-risk improves sub-linearly. The
+  lifted-cap hit rate of 51.1% is still below it.
 
-One caution for the redesign: **[synthetic]** B fires 734 times on random-walk
-data versus 801 **[real]**, only 9% more. A cascade genuinely reading market
-structure would be expected to separate real data from a random walk by more than
-that. This is a reason for modest expectations, not a verdict.
+Two implementation checks were run and both came back clean: `resolve()` walking from the
+fill bar itself is worth ~0.8pp (the bar that reached a long's limit usually opened above
+it, so testing TP on it is mildly asymmetric), and the synthetic generator's block-drift
+regimes do not reach the trades — the regime-aligned control resolves *below* 50%, and
+the cascade takes 46.4% longs, i.e. slightly against the drift. Neither explains the
+geometry gap.
 
-## 6. What a follow-up would need to decide
+## 5. What the stop cap selected
 
-These are the open design choices, not recommendations:
+**[real]** the 587 `stop_too_wide` rejects, resolved under the lifted horizon: **52.3%**
+(n=459, CI [47.7%, 56.8%]) against the traded subset's 43.8%.
 
-1. **Make the time stop proportional to stop width** rather than fixed — the
-   width² relationship above gives a principled basis. Or normalise the other
-   way: define the stop in 15m ATR terms so widths stop varying so much.
-2. **Resolve the timeframe mismatch** — if the stop anchors to a 30m extreme, the
-   cap arguably belongs in 30m ATR, not 15m.
-3. **Decide what the cap is for.** Position sizing is already risk-normalised
-   (0.75% of equity), so a wider stop reduces size rather than increasing risk.
-   The cap's real job is to keep the fee-to-stop ratio sane and the horizon
-   tradeable — both of which are better expressed directly.
-4. Whatever changes, it must be **pre-registered before seeing results**. Changing
-   the cap now, in a fresh spec, is legitimate. Changing it in response to these
-   numbers, inside the same experiment, would not be.
+The cap threw away the better half. The difference is 8.5pp with a standard error of
+5.6pp, so it is suggestive rather than established, and the two sets were resolved under
+different bar limits. But the direction matters: the cap is not a quality filter, and any
+claim about "Strategy B's hit rate" that rests on the 96 trades is a claim about an
+adversely selected subset. Note also that the rejects' 52.3% is itself indistinguishable
+from the **[synthetic]** rejects' 48.7% (difference 3.6pp, SE 3.2pp) — consistent with
+§4: no edge anywhere in the population.
 
-## 7. Infrastructure available for reuse
+## 6. Ablations
 
-Already built, tested and no-lookahead verified (`shared/`): 15m/30m/1H/4H feature
-assembly with HTF values attaching only on candle close; 1H displacement zones;
-30m sweep detection; the cascade itself with ablation switches; the cost-inclusive
-gate with per-signal break-even, Wilson intervals, one-position-at-a-time thinning
-and a regime-matched random control; a synthetic falsification check that both
-strategies correctly fail.
+**[real]** hit rates under the shipped config, reporting only:
 
-Changing geometry parameters requires editing `shared/config.py` only. Changing
-the time-stop *rule* from fixed to width-dependent requires a small change in
-`shared/gate.py` (`resolve`) and in the backtest when it is eventually run.
+| | signals | trades | hit rate | Wilson 95% |
+|---|---|---|---|---|
+| full cascade | 801 | 96 | 43.8% | [34.3%, 53.7%] |
+| no 30m sweep | 883 | 453 | 45.7% | [41.2%, 50.3%] |
+| no 1H zone | 2648 | 249 | 44.6% | [38.5%, 50.8%] |
+| break only | — | 1187 | 48.3% | [45.4%, 51.1%] |
 
-## 8. Ablations (reporting only, never used to select)
+Stripping filters does not hurt and may help; the plainest configuration (4H agreement
+plus a decisive 15m break) has both the largest sample and the highest hit rate. No pair
+of these is separated beyond noise.
 
-**[real]** dropping the 30m sweep requirement: 801 → 883 signals. Dropping the 1H
-zone requirement: 801 → 2648. The 1H zone is doing nearly all of the filtering;
-the 30m sweep admits only ~10% more when removed, so on frequency grounds it is
-close to redundant. Whether it improves *quality* was never measurable, because
-the gate never got a clean sample.
+**One caveat that keeps this from being a clean comparison:** dropping the sweep
+requirement also changes the stop anchor, because `cascade()` falls back to the signal
+bar's own extreme when there is no sweep. The no-sweep and break-only rows therefore have
+materially tighter stops and different geometry, not just fewer filters. A follow-up that
+wants to judge the filters on quality must hold the stop rule fixed across ablations.
+
+## 7. What is now established, and what is not
+
+Established:
+
+- The 96-bar time stop is not the constraint (§3).
+- The cascade does not separate real data from a random walk at n≈581 (§4).
+- The 2.5 ATR cap selects adversely rather than filtering for quality (§5).
+- The random control as built measures geometry, not edge (§4).
+
+Not established:
+
+- Whether any *sub*-population of the cascade carries an edge. §4 pools everything; a
+  conditional split (session, volatility regime, distance from the 4H swing) was never
+  tested and is the only place left where an edge could hide.
+- Whether the 1H zone and 30m sweep help quality, for the stop-anchor reason in §6.
+
+## 8. Design choices for a follow-up
+
+Choices, not recommendations. Each must be fixed **before** results are seen; changing a
+rule in a fresh pre-registration is legitimate, changing it in response to these numbers
+inside the same experiment is not.
+
+1. **Decide whether this cascade is worth another round at all.** §4 is the relevant
+   number, and it is a null at a sample size large enough to mean it. The honest default
+   is to stop, not to re-parameterise.
+2. If it continues, **fix the control first.** A baseline that the strategy beats by 7pp
+   on random-walk data cannot support any conclusion.
+3. **Hold the stop rule fixed across ablations**, so the filters are judged on quality
+   rather than on an incidental change in stop width.
+4. **Set the sample requirement up front.** Detecting +5pp over a ~49% baseline at 80%
+   power needs roughly 600–800 trades, not 150. The lifted-cap run reaches 581, so the
+   measurement is feasible — it is the *gate* at 96 that was not. A follow-up that cannot
+   reach that number should say so and plan to pool more symbols or a longer history.
+5. **Decide what the cap is for.** Position sizing is already risk-normalised (0.75% of
+   equity), so a wider stop reduces size rather than increasing risk. §5 shows the cap is
+   costing signal quality; its real jobs are keeping the fee-to-stop ratio sane and the
+   horizon tradeable, and both are better expressed directly.
+
+## 9. Infrastructure available for reuse
+
+Built, tested and no-lookahead verified (`shared/`): 15m/30m/1H/4H feature assembly with
+HTF values attaching only on candle close; 1H displacement zones; 30m sweep detection;
+the cascade with ablation switches; the cost-inclusive gate with per-signal break-even,
+Wilson intervals, one-position-at-a-time thinning and a regime-matched random control
+(see §4 before trusting it); a synthetic falsification check; and `shared/diagnostics.py`,
+which produces every table above on either data source.
+
+Geometry parameters live in `shared/config.py`. Changing the time-stop rule from fixed to
+width-dependent needs a small change in `shared/gate.py` (`resolve`) — though §3 says
+there is no reason to.

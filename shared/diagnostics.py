@@ -63,13 +63,18 @@ def resolved(outcomes):
 
 
 def hit_line(label, res, width=26):
+    """Widening the stop lowers the cost-to-risk ratio, so the break-even rate a set
+    of trades must clear is not fixed -- it is reported alongside, per set."""
     if not res:
         return f"  {label:<{width}} no trades"
     n = len(res)
     w = sum(o["win"] for o in res)
     lo, hi = wilson(w, n)
+    req = [o["required"] for o in res if "required" in o]
+    tail = f"  required={np.mean(req):>5.1%}" if req else ""
     return (f"  {label:<{width}} n={n:<5} hit={w / n:>6.1%}  "
-            f"CI [{lo:>5.1%}, {hi:>5.1%}]  time-stopped={sum(o['status'] == 'time' for o in res) / n:>5.1%}")
+            f"CI [{lo:>5.1%}, {hi:>5.1%}]  "
+            f"time-stopped={sum(o['status'] == 'time' for o in res) / n:>5.1%}{tail}")
 
 
 def bucket_table(rows, title):
@@ -144,7 +149,7 @@ def main():
         for o in resolved(evaluate(f, sigs, cfg_loose, symbol,
                                    cfg.entry_valid_bars_b, GENEROUS_BARS)):
             row = (abs(o["entry"] - o["stop"]) / atr[o["idx"]], bool(o["win"]),
-                   o["exit_idx"] - o["idx"], o["status"] == "time")
+                   o["exit_idx"] - o["idx"], o["status"] == "time", o["required"])
             loose_rows.append(row)
             if o["idx"] in wide:
                 rejected_rows.append(row)
@@ -178,8 +183,9 @@ def main():
     print(f"6.2  stop width vs outcome ({tag}, cap lifted, {GENEROUS_BARS}-bar horizon)")
     print("=" * 78)
     bucket_table(loose_rows, "  cascade signals")
-    print("\n" + hit_line("pooled cascade", [{"win": r[1], "status": "time" if r[3] else "x"}
-                                             for r in loose_rows]))
+    print("\n" + hit_line("pooled cascade",
+                             [{"win": r[1], "status": "time" if r[3] else "x",
+                               "required": r[4]} for r in loose_rows]))
     print(hit_line("regime-matched control", control))
     print("\n  Both lines use the same lifted cap and horizon, so the gap between them")
     print("  is geometry plus edge; on synthetic data it is geometry alone.")
@@ -188,8 +194,9 @@ def main():
     print(f"6.4  the stop_too_wide rejects, had they traded ({tag})")
     print("=" * 78)
     bucket_table(rejected_rows, "  rejected signals only")
-    print("\n" + hit_line("pooled rejects", [{"win": r[1], "status": "time" if r[3] else "x"}
-                                             for r in rejected_rows]))
+    print("\n" + hit_line("pooled rejects",
+                             [{"win": r[1], "status": "time" if r[3] else "x",
+                               "required": r[4]} for r in rejected_rows]))
 
     print("\n" + "=" * 78)
     print(f"6.5  per-ablation hit rates ({tag}, config as shipped)")
