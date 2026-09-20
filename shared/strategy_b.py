@@ -108,3 +108,23 @@ def count_report(f, cfg):
         "no_zone_req": len(cascade(f, cfg, require_zone=False)),
         "break_only": len(cascade(f, cfg, require_zone=False, require_sweep=False)),
     }
+
+
+def regime_mask(f, cfg):
+    """Bars where the 4H direction allows a trade. The random control uses the same
+    filter, so it sits in the same regime rather than trading everywhere."""
+    t4 = f["trend_4h"].to_numpy()
+    return {1: t4 == 1, -1: t4 == -1}
+
+
+def stop_for(f, i: int, d: int, cfg):
+    """Strategy B stop: beyond the 30m sweep extreme, ATR-buffered. Falls back to
+    the bar's own extreme when no sweep is on the tape, which is what the cascade
+    itself does."""
+    atr = f["atr"].to_numpy()[i]
+    px = (f["sweep_low_px"].to_numpy()[i] if d == 1 else f["sweep_high_px"].to_numpy()[i])
+    if not np.isfinite(px):
+        px = f["low"].to_numpy()[i] if d == 1 else f["high"].to_numpy()[i]
+    if not (np.isfinite(atr) and atr > 0 and np.isfinite(px)):
+        return np.nan
+    return px - d * cfg.stop_buffer_atr_b * atr
