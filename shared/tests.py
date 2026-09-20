@@ -17,6 +17,7 @@ from data import synthetic
 from shared.config import ABConfig
 from shared.features import build_features, FEATURE_COLS
 from shared.indicators import market_structure, resample, stoch_rsi
+from shared.diagnostics import clustering_factor, trades_needed
 from shared.strategy_b import cascade
 
 
@@ -125,6 +126,37 @@ def test_ablations_are_supersets():
     print(f"ok  ablations are supersets (full {full}, no-sweep {no_sweep}, no-zone {no_zone})")
 
 
+def test_trades_needed_matches_closed_form():
+    """A textbook case, checked by hand: distinguishing 52.6% from 50.0% at 80%
+    power and alpha 0.05 needs ~2,900 one-sample observations. The two-sample
+    figure must be larger, because both arms are estimated rather than assumed."""
+    one, two = trades_needed(0.50, 0.526)
+    assert 2850 <= one <= 2950, f"one-sample n = {one:.0f}, expected ~2900"
+    assert two > one, "a two-arm test cannot be cheaper than a one-sample test"
+    assert 5600 <= two <= 6000, f"two-sample n = {two:.0f} per arm, expected ~5800"
+    assert trades_needed(0.50, 0.55)[0] < one, "a larger effect must need fewer trades"
+    print(f"ok  power calculator: {one:.0f} one-sample, {two:.0f} per arm two-sample")
+
+
+def test_clustering_factor_sees_clustering():
+    """The point of the ratio is to separate clustered trades from scattered ones.
+    Scattered coin flips must land near 1x; a hit rate that drifts slowly through
+    the sample must land well above it. The tolerance on the i.i.d. case is wide
+    because ~26 blocks cannot pin a variance ratio more tightly than that."""
+    rng = np.random.default_rng(7)
+    n = 900
+    ts = pd.to_datetime("2024-01-01", utc=True) + pd.to_timedelta(
+        np.sort(rng.uniform(0, 730, n)), unit="D")
+    scattered = rng.random(n) < 0.5
+    drifting = rng.random(n) < (0.5 + 0.25 * np.sin(np.linspace(0, 6 * np.pi, n)))
+    r_flat = clustering_factor(list(zip(ts, scattered)))[2]
+    r_clus = clustering_factor(list(zip(ts, drifting)))[2]
+    assert 0.6 <= r_flat <= 1.4, f"scattered trades reported {r_flat:.2f}x clustering"
+    assert r_clus > 1.5, f"drifting trades reported only {r_clus:.2f}x clustering"
+    assert r_clus > r_flat * 1.5, "clustered and scattered sets are not separated"
+    print(f"ok  clustering factor: scattered {r_flat:.2f}x, drifting {r_clus:.2f}x")
+
+
 if __name__ == "__main__":
     test_stoch_rsi_bounds()
     test_market_structure_is_causal()
@@ -132,3 +164,5 @@ if __name__ == "__main__":
     test_strategy_b_conditions_hold()
     test_ablations_are_supersets()
     test_no_lookahead()
+    test_trades_needed_matches_closed_form()
+    test_clustering_factor_sees_clustering()

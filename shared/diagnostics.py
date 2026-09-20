@@ -10,6 +10,8 @@ rejected and truncated signals can be observed, not traded.
   6.3  synthetic generator drift and long/short split      (runs with --synthetic)
   6.4  what the stop_too_wide rejects would have done under a generous horizon
   6.5  per-ablation hit rates, not just signal counts
+  8.3  block-bootstrap intervals, which drop the independence assumption
+  8.5  the trade count a given effect size actually needs
 
 Usage:
   python shared/diagnostics.py               # real data (uses the cached CSVs)
@@ -21,6 +23,9 @@ import pathlib
 import sys
 
 import numpy as np
+import pandas as pd
+from math import sqrt
+from statistics import NormalDist
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
@@ -31,6 +36,8 @@ from shared.features import build_features                           # noqa: E40
 from shared.gate import evaluate, random_control, wilson             # noqa: E402
 
 GENEROUS_BARS = 500          # section 6.2 asks for a horizon long enough to resolve
+BLOCK_DAYS = 28              # bootstrap block: long enough to swallow a 4H-structure regime
+BOOT_ITERS = 4000
 BUCKETS = [(0.0, 2.5, "<= 2.5 ATR"), (2.5, 4.0, "2.5-4 ATR"),
            (4.0, 6.0, "4-6 ATR"), (6.0, np.inf, "> 6 ATR")]
 
@@ -75,6 +82,99 @@ def hit_line(label, res, width=26):
     return (f"  {label:<{width}} n={n:<5} hit={w / n:>6.1%}  "
             f"CI [{lo:>5.1%}, {hi:>5.1%}]  "
             f"time-stopped={sum(o['status'] == 'time' for o in res) / n:>5.1%}{tail}")
+
+
+def block_bootstrap(rows, block_days=BLOCK_DAYS, iters=BOOT_ITERS, seed=11):
+    """A confidence interval that does not assume trades are independent.
+
+    A Wilson interval treats every trade as its own observation. These are not:
+    the four symbols are strongly correlated and the cascade keys off 4H
+    structure, so signals arrive in clusters. Resampling contiguous stretches of
+    calendar time keeps each cluster intact, which is what widens the interval
+    to something honest.
+
+    Blocks overlap and wrap around the end of the sample (a moving-block
+    bootstrap). Cutting the sample into ~26 fixed blocks instead leaves the
+    interval width itself carrying about 15% sampling error, which is too noisy
+    to quote; drawing from every possible start removes that.
+
+    rows: (timestamp, win) per trade, pooled across symbols.
+    Returns (lo, hi, effective_blocks_drawn_per_resample).
+    """
+    if not rows:
+        return float("nan"), float("nan"), 0
+    order = np.argsort([r[0].value for r in rows])
+    ts = np.array([rows[i][0].value for i in order])
+    win = np.array([bool(rows[i][1]) for i in order])
+    n = len(win)
+    span = ts[-1] - ts[0]
+    width = pd.Timedelta(days=block_days).value
+    if span <= width:
+        lo, hi = wilson(int(win.sum()), n)
+        return lo, hi, 1
+
+    # Wrapping the series makes every timestamp an equally likely block start,
+    # so no part of the sample is systematically under-represented.
+    ts2 = np.concatenate([ts, ts + span])
+    win2 = np.concatenate([win, win])
+    rng = np.random.default_rng(seed)
+    per_resample = max(1, round(span / width))
+    draws = []
+    for _ in range(iters):
+        starts = ts[0] + rng.random(per_resample) * span
+        lo_i = np.searchsorted(ts2, starts)
+        hi_i = np.searchsorted(ts2, starts + width)
+        total = wins = 0
+        for a, b in zip(lo_i, hi_i):
+            wins += int(win2[a:b].sum())
+            total += b - a
+        if total:
+            draws.append(wins / total)
+    return (float(np.percentile(draws, 2.5)), float(np.percentile(draws, 97.5)),
+            per_resample)
+
+
+def clustering_factor(rows, shuffles=9, seed=23):
+    """How much the independence assumption understates the uncertainty.
+
+    The bootstrap above carries its own bias -- roughly +/-15% at these sample
+    sizes, and it narrows slightly as trades get dense. Comparing a set against
+    a Wilson interval would fold that bias into the answer. Comparing it against
+    a label-shuffled copy of itself does not: the shuffle keeps the timestamps,
+    the sample size and the overall hit rate, and destroys only the clustering,
+    so the bias cancels and what is left is the clustering alone.
+
+    Returns (width_actual, width_shuffled, ratio).
+    """
+    lo, hi, _ = block_bootstrap(rows)
+    actual = hi - lo
+    rng = np.random.default_rng(seed)
+    wins = np.array([r[1] for r in rows])
+    widths = []
+    for _ in range(shuffles):
+        sh = rng.permutation(wins)
+        blo, bhi, _ = block_bootstrap([(r[0], bool(w)) for r, w in zip(rows, sh)])
+        widths.append(bhi - blo)
+    null = float(np.median(widths))
+    return actual, null, (actual / null if null > 0 else float("nan"))
+
+
+def trades_needed(p0: float, p1: float, power: float = 0.80, alpha: float = 0.05):
+    """Normal-approximation sample size for distinguishing p1 from p0.
+
+    Returns (one_sample, two_sample_per_arm). The one-sample figure is the
+    question "does this hit rate clear its break-even rate"; the two-sample
+    figure is "does this hit rate beat a placebo arm", which costs roughly
+    twice as much because both sides are estimated.
+    """
+    nd = NormalDist()
+    za, zb = nd.inv_cdf(1 - alpha / 2), nd.inv_cdf(power)
+    d = abs(p1 - p0)
+    if d == 0:
+        return float("inf"), float("inf")
+    one = (za * sqrt(p0 * (1 - p0)) + zb * sqrt(p1 * (1 - p1))) ** 2 / d ** 2
+    two = (za + zb) ** 2 * (p0 * (1 - p0) + p1 * (1 - p1)) / d ** 2
+    return one, two
 
 
 def bucket_table(rows, title):
@@ -132,6 +232,8 @@ def main():
     ablations = {"full cascade": [], "no 30m sweep": [], "no 1H zone": [],
                  "break only": []}
     control = []
+    boot = {"pooled cascade (cap lifted)": [], "regime-matched control": [],
+            "break only (as shipped)": []}      # (timestamp, win) for section 8.3
 
     cfg_loose = loosen(cfg, cap=True, fees=True)
 
@@ -151,6 +253,8 @@ def main():
             row = (abs(o["entry"] - o["stop"]) / atr[o["idx"]], bool(o["win"]),
                    o["exit_idx"] - o["idx"], o["status"] == "time", o["required"])
             loose_rows.append(row)
+            boot["pooled cascade (cap lifted)"].append(
+                (f["close_time"].iloc[o["idx"]], bool(o["win"])))
             if o["idx"] in wide:
                 rejected_rows.append(row)
 
@@ -158,13 +262,20 @@ def main():
                          ("no 1H zone", {"require_zone": False}),
                          ("break only", {"require_zone": False, "require_sweep": False})):
             a = strategy_b.cascade(f, cfg, **kw)
-            ablations[name] += resolved(evaluate(f, a, cfg, symbol,
-                                                 cfg.entry_valid_bars_b, cfg.max_bars_b))
+            outs = resolved(evaluate(f, a, cfg, symbol,
+                                     cfg.entry_valid_bars_b, cfg.max_bars_b))
+            ablations[name] += outs
+            if name == "break only":
+                boot["break only (as shipped)"] += [
+                    (f["close_time"].iloc[o["idx"]], bool(o["win"])) for o in outs]
 
         cs = random_control(f, cfg, strategy_b.regime_mask(f, cfg),
                             strategy_b.stop_for, seed_offset=i)
-        control += resolved(evaluate(f, cs, cfg_loose, symbol,
-                                     cfg.entry_valid_bars_b, GENEROUS_BARS))
+        cs_out = resolved(evaluate(f, cs, cfg_loose, symbol,
+                                   cfg.entry_valid_bars_b, GENEROUS_BARS))
+        control += cs_out
+        boot["regime-matched control"] += [
+            (f["close_time"].iloc[o["idx"]], bool(o["win"])) for o in cs_out]
         print(f"  {label}: {len(sigs)} signals", flush=True)
 
     print("\n" + "=" * 78)
@@ -204,6 +315,47 @@ def main():
     for name, outs in ablations.items():
         print(hit_line(name, outs))
     print("\n  Reporting only. The spec forbids using an ablation to select anything.")
+
+    print("\n" + "=" * 78)
+    print(f"8.3  block-bootstrap intervals ({tag}, {BLOCK_DAYS}-day blocks, "
+          f"{BOOT_ITERS} resamples)")
+    print("=" * 78)
+    print(f"  {'set':<30} {'n':>5} {'hit':>7} {'Wilson 95%':>18} "
+          f"{'bootstrap 95%':>18} {'vs shuffled':>12}")
+    for name, rows in boot.items():
+        if not rows:
+            continue
+        n = len(rows)
+        w = sum(r[1] for r in rows)
+        wl, wh = wilson(w, n)
+        bl, bh, _ = block_bootstrap(rows)
+        _, _, ratio = clustering_factor(rows)
+        print(f"  {name:<30} {n:>5} {w / n:>7.1%} "
+              f"{f'[{wl:.1%}, {wh:.1%}]':>18} {f'[{bl:.1%}, {bh:.1%}]':>18} "
+              f"{ratio:>11.2f}x")
+    print("\n  The last column is the clustering cost, measured against a label-shuffled")
+    print("  copy of the same trades rather than against Wilson, so the bootstrap's own")
+    print("  bias cancels. 1.00x means the trades carry no more information together")
+    print("  than they would scattered at random, i.e. the independence assumption was")
+    print("  harmless; above 1.00x, every Wilson interval elsewhere in this output is")
+    print("  too narrow by about that factor and the conclusions drawn from them are")
+    print("  correspondingly overconfident.")
+    print("\n  Resolution: with ~26 blocks in 730 days this ratio carries about +/-25%")
+    print("  noise. It separates 'roughly none' from 'substantial'; it cannot tell")
+    print("  1.0x from 1.3x. Read it as an order of magnitude, not a correction factor.")
+
+    print("\n" + "=" * 78)
+    print("8.5  trades needed, by effect size (80% power, alpha 0.05)")
+    print("=" * 78)
+    print(f"  {'edge over a 50% baseline':<26} {'vs break-even':>14} {'vs a placebo arm':>18}")
+    for d in (0.026, 0.03, 0.04, 0.05, 0.08, 0.10):
+        one, two = trades_needed(0.50, 0.50 + d)
+        print(f"  {f'+{100 * d:.1f} pp':<26} {one:>14,.0f} {f'{two:,.0f} per arm':>18}")
+    print(f"\n  This run produced {len(loose_rows)} resolved trades from "
+          f"{cfg.days} days x {len(cfg.symbols)} symbols.")
+    print("  Read the table against that number before designing a follow-up: an edge")
+    print("  that needs more trades than the data can ever supply is not a finding")
+    print("  waiting to be confirmed, it is a question this design cannot ask.")
 
     if args.synthetic:
         drift_report(cfg)
