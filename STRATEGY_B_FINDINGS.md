@@ -53,18 +53,22 @@ That is below 50% *with costs switched off entirely*, and the interval reaches 5
 
 This comparison does more work than the whole stress-test table in §2, because it is immune to every objection about cost modelling, slippage assumptions and fee tiers.
 
-**[corrected] The 50% line is for a plain 1:1 exit, which is not what the spec trades.** The specified exit closes 50% at TP1 and runs the remainder to 2R against a breakeven stop, so its zero-cost break-even is `1/(1.5 + q)` where `q` is runner conversion, not 50%:
+**[corrected, now measured] The 50% line is for a plain 1:1 exit, which is not what the spec trades.** The specified exit closes 50% at TP1 and runs the remainder to 2R against a breakeven stop, so its zero-cost break-even is `1/(1.5 + q)` where `q` is runner conversion. That is 50% only when `q` happens to be 50%. `q` was measured per configuration rather than borrowed:
 
-| runner conversion q | zero-cost break-even |
-|---|---|
-| 40% | 52.6% |
-| 45.2% (measured, full cascade) | 51.2% |
-| 50% | 50.0% |
-| 57% | 48.3% |
+| configuration | n | hit rate | Wilson 95% | runner q | zero-cost line |
+|---|---|---|---|---|---|
+| full cascade | 96 | 43.8% | [34.3%, 53.7%] | 45.2% | 51.2% |
+| no 30m sweep | 453 | 45.7% | [41.2%, 50.3%] | 49.3% | 50.2% |
+| no 1H zone | 249 | 44.6% | [38.5%, 50.8%] | 50.5% | 49.9% |
+| **break only** | **1187** | **48.3%** | **[45.4%, 51.1%]** | **48.2%** | **50.5%** |
 
-At the measured `q`, the zero-cost line is **51.2%**, and break-only's entire interval [45.4%, 51.1%] falls below it — a stronger statement than the one above. But `q` was measured on the full cascade, not on break-only, and break-only's tighter stops put its 2R target a smaller absolute distance away, which could raise it. The point estimate stays below the line for any `q` under 57%; the interval's top stays below only for `q` under 45.7%.
+Measuring it was necessary rather than pedantic: on **[synthetic]** data `q` ranges from 31.8% to 52.8% across these same configurations, moving the line from 55.0% to 49.3%. On real data it turned out to be stable near 48–50%, so the 50% figure was a good approximation — but that was not knowable in advance.
 
-So §3 trades an immunity to cost assumptions for a dependence on one unmeasured number. The honest statement is: **break-only's point estimate is below its zero-cost break-even under any plausible runner conversion, and its whole interval is below it if break-only's `q` matches the 45.2% measured elsewhere.** Measuring `q` for the break-only set would close this, and it is one number.
+**Every configuration's point estimate sits below its own zero-cost line.** Break-only is 2.2 pp below. No interval, however, sits *entirely* below: break-only's Wilson top crosses by 0.6 pp, the block bootstrap's by 1.1 pp, and the other three by 0.1 to 2.5 pp.
+
+So the precise claim is narrower than "there is nothing there before costs", and it is this: **the best estimate of break-only's pre-cost performance is a 2.2 pp deficit, and the data cannot rule out its being level with zero-cost break-even, but no reading of it supports a pre-cost edge.**
+
+The decomposition is the useful part. Break-only falls 5.5 pp short of its 53.8% requirement. Of that, **3.3 pp is round-trip cost and 2.2 pp is a pre-cost deficit.** Eliminating costs entirely — a zero-fee exchange with no slippage — closes 60% of the gap and still leaves the strategy short. That is what makes the conclusion robust to every objection about fee tiers: the cost assumption is real and it is the larger term, but it is not the whole term, and removing it does not produce a viable strategy.
 
 ## 4. Clustering: measured, smaller than assumed, and mildly corroborating
 
@@ -104,7 +108,7 @@ Three reasons it is not worth doing:
 ## 6. What is established
 
 - The 96-bar time stop is not the constraint: 1 of 96 trades timed out (v3 §3).
-- At the largest and least-selected sample (break-only, n=1,187), the hit rate is below 50% — below break-even even at zero cost — and below its cost-inclusive requirement under every widening correction tried (§2, §3).
+- At the largest and least-selected sample (break-only, n=1,187), the hit rate is below its cost-inclusive requirement under every widening correction tried, and below its measured zero-cost break-even of 50.5% by 2.2 pp at the point estimate, though not across the whole interval (§2, §3).
 - The as-specified configurations are nested subsets of that sample and behave the same way; the full-cascade row is a tie and carries no weight (§2).
 - Cross-symbol clustering is not detectable, so the intervals are close to honest and adding symbols would scale nearly linearly. This bears on the width of the estimates, not on their level, and rules out regime-masking only (§4).
 - The random-walk control measures geometry, not edge: the cascade leads it by 7.0 pp on real data and 7.5 pp where no edge exists (v3 §4). Any future work needs a construction-matched placebo instead.
