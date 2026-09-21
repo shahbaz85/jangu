@@ -15,3 +15,8 @@ mr70/paper_state.json
 mr70/paper_*.csv
 mr70/_t_*
 carry_cache/
+
+mr70/study_state.json
+mr70/study_signals.csv
+logs/
+mr70/_t_*/
