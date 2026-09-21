@@ -19,7 +19,9 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from mr70.indicators import build_features                              # noqa: E402
 from mr70.signals import v3_vwap_climax                                 # noqa: E402
-from mr70.v3_1h import (V3OneHourConfig, min_tradeable_rate,          # noqa: E402
+from mr70.v3_1h import (FILL_OFFSET_ATR, V3OneHourConfig,            # noqa: E402
+                        block_shuffled_volume, evaluate_fill,
+                        min_tradeable_rate, paired_bootstrap,
                         required_rate, shifted_signals, two_arm_n)
 
 
@@ -153,6 +155,87 @@ def test_two_arm_n_accounts_for_the_larger_placebo():
     print(f"ok  two-arm sizing uses the arm ratio ({equal:.0f} equal -> {bigger:.0f} at 2.37x)")
 
 
+def _arm(n, p, seed, days=1460):
+    rng = np.random.default_rng(seed)
+    ts = pd.to_datetime("2022-01-01", utc=True) + pd.to_timedelta(
+        np.sort(rng.uniform(0, days, n)), unit="D")
+    return list(zip(ts, rng.random(n) < p))
+
+
+def test_paired_bootstrap_separates_equal_from_different_arms():
+    """The interval the verdict rests on. Two arms drawn at the same rate must
+    give an interval straddling zero; a 15 pp gap must give one clear of it."""
+    same = paired_bootstrap(_arm(900, 0.75, 1), _arm(2200, 0.75, 2))
+    assert same[0] < 0 < same[1], f"equal arms gave {same}, which excludes zero"
+    diff = paired_bootstrap(_arm(900, 0.80, 3), _arm(2200, 0.65, 4))
+    assert diff[0] > 0, f"a 15 pp gap gave {diff}, which includes zero"
+    print(f"ok  paired bootstrap separates arms (equal {same[0]:+.1%}..{same[1]:+.1%}, "
+          f"15pp gap {diff[0]:+.1%}..{diff[1]:+.1%})")
+
+
+def test_paired_bootstrap_coverage_is_declared():
+    """Measure how often the interval covers a true zero difference. The addendum
+    warns it runs slightly narrow; this pins the number rather than trusting it.
+    Anything far below nominal would make condition 3 too easy to pass."""
+    hits = 0
+    trials = 40
+    for k in range(trials):
+        lo, hi = paired_bootstrap(_arm(900, 0.75, 100 + k), _arm(2200, 0.75, 500 + k),
+                                  iters=1200)
+        hits += lo < 0 < hi
+    cover = hits / trials
+    assert cover >= 0.80, f"coverage {cover:.0%} is too far below the nominal 95%"
+    print(f"ok  paired bootstrap covers a true zero {cover:.0%} of the time "
+          f"(nominal 95%, {trials} trials)")
+
+
+def test_strict_fill_discriminates_at_the_boundary():
+    """A bar that touches the limit exactly must fill under the touch model and
+    not under the strict one. Comparing two models that both fill nothing proves
+    nothing, so the boundary case is constructed here rather than hoped for."""
+    cfg = V3OneHourConfig()
+    df = fixture(n=600, spike_at=400)
+    f0 = build_features(df, cfg)
+    sigs = v3_vwap_climax(f0, cfg)
+    assert sigs, "fixture produced no signal to test the fill models with"
+    i, d = sigs[0]
+    assert d == 1, "this boundary case is written for a long"
+
+    entry = f0["close"].to_numpy()[i]
+    atr_i = f0["atr"].to_numpy()[i]
+    nxt = df.index[i + 1]
+    df.loc[nxt, "low"] = entry                       # touches the limit, no further
+    df.loc[nxt, "high"] = max(df.loc[nxt, "high"], entry + 0.5)
+    f = build_features(df, cfg)
+
+    touch = evaluate_fill(f, [(i, d)], cfg, "BTC/USDT:USDT", 0.0)
+    strict = evaluate_fill(f, [(i, d)], cfg, "BTC/USDT:USDT", FILL_OFFSET_ATR)
+    assert touch and touch[0]["status"] != "unfilled", "touch model missed an exact touch"
+    assert strict and strict[0]["status"] == "unfilled", (
+        f"strict model filled on an exact touch, needing {FILL_OFFSET_ATR} ATR "
+        f"({FILL_OFFSET_ATR * atr_i:.4f}) more")
+    print(f"ok  strict fill rejects an exact touch that the touch model takes "
+          f"(offset {FILL_OFFSET_ATR} ATR = {FILL_OFFSET_ATR * atr_i:.4f})")
+
+
+def test_block_shuffled_volume_keeps_the_distribution():
+    """Shuffling whole weeks must preserve volume clustering -- without it V3
+    cannot fire on the synthetic arm and the falsification check is vacuous."""
+    rng = np.random.default_rng(9)
+    n = 24 * 7 * 60
+    real = pd.DataFrame({"volume": np.abs(rng.lognormal(3, 1.2, n))})
+    out = block_shuffled_volume(real, 5000, seed=11)
+    assert len(out) == 5000, f"got {len(out)} bars, expected 5000"
+    src, got = real["volume"].to_numpy(), out
+    assert abs(np.mean(got) / np.mean(src) - 1) < 0.35, "mean volume drifted too far"
+    spike_src = np.mean(src[24:] > 3 * pd.Series(src).rolling(24).mean().shift(1)[24:])
+    spike_got = np.mean(got[24:] > 3 * pd.Series(got).rolling(24).mean().shift(1)[24:])
+    assert spike_got > 0.5 * spike_src, (
+        f"3x spike rate collapsed from {spike_src:.4f} to {spike_got:.4f}")
+    print(f"ok  block-shuffled volume keeps 3x spikes "
+          f"({spike_src:.3%} real -> {spike_got:.3%} shuffled)")
+
+
 if __name__ == "__main__":
     test_config_converts_windows_by_time()
     test_slippage_split_matches_spec()
@@ -162,3 +245,7 @@ if __name__ == "__main__":
     test_no_lookahead_in_1h_features()
     test_min_tradeable_rate_reduces_to_break_even()
     test_two_arm_n_accounts_for_the_larger_placebo()
+    test_paired_bootstrap_separates_equal_from_different_arms()
+    test_paired_bootstrap_coverage_is_declared()
+    test_strict_fill_discriminates_at_the_boundary()
+    test_block_shuffled_volume_keeps_the_distribution()

@@ -162,8 +162,13 @@ def load(symbol, cfg, use_synthetic, i):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--synthetic", action="store_true")
+    ap.add_argument("--stage1", action="store_true",
+                    help="run the full Stage 1 gate in one pass (addendum)")
     args = ap.parse_args()
     cfg = V3OneHourConfig()
+    if args.stage1:
+        report_stage1(cfg)
+        return
     tag = "SYNTHETIC" if args.synthetic else "REAL DATA"
 
     per, be_all, ps_all = {}, [], []
@@ -285,3 +290,318 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# =============================================================================
+# Stage 1 (addendum). Everything below runs in a single pass and prints one
+# report, per the blindness protocol: no V3 outcome is inspected until every
+# condition, sensitivity and the synthetic check has been computed.
+# =============================================================================
+
+FILL_OFFSET_ATR = 0.05      # Change 3: strict model requires price to trade through
+SYN_SEEDS = range(400, 412)
+SYN_MIN_SIGNALS = 300
+VOL_BLOCK_HOURS = 24 * 7    # Change 4: 7-day blocks preserve volume clustering
+
+
+def resolve_fill(f_arr, i, d, cfg, cost, fill_offset_atr=0.0):
+    """mr70.edge_gate.resolve, with the fill requirement parameterised.
+
+    The touch model (offset 0) fills when a bar's low reaches the limit. The
+    strict model requires price to trade `fill_offset_atr` beyond it, standing in
+    for queue position, while still filling at the limit price.
+    """
+    o, h, l, c, atr = f_arr
+    n = len(c)
+    entry, a = c[i], atr[i]
+    if not np.isfinite(a) or a <= 0:
+        return None
+    if cfg.tp_atr * a / entry < cfg.min_tp_cost_mult * cost:
+        return {"status": "tp_too_small_vs_fees"}
+    if i + 1 + cfg.max_bars >= n:
+        return None
+
+    trigger = entry - d * fill_offset_atr * a
+    fill = None
+    for j in range(i + 1, min(i + 1 + cfg.entry_valid_bars, n)):
+        if (l[j] <= trigger) if d == 1 else (h[j] >= trigger):
+            fill = j
+            break
+    if fill is None:
+        return {"status": "unfilled"}
+
+    tp, sl = entry + d * cfg.tp_atr * a, entry - d * cfg.sl_atr * a
+    last = min(fill + cfg.max_bars, n - 1)
+    for j in range(fill, last + 1):
+        if (l[j] <= sl) if d == 1 else (h[j] >= sl):
+            return {"status": "sl", "win": False, "exit_idx": j}
+        if (h[j] >= tp) if d == 1 else (l[j] <= tp):
+            return {"status": "tp", "win": True, "exit_idx": j}
+    return {"status": "time", "win": False, "exit_idx": last}
+
+
+def evaluate_fill(f, signals, cfg, symbol, fill_offset_atr=0.0):
+    """Non-overlap rule plus cooldown, under a given fill model."""
+    arr = tuple(f[k].to_numpy() for k in ("open", "high", "low", "close", "atr"))
+    cost = cfg.round_trip_cost(symbol)
+    out, busy_until = [], -1
+    for i, d in signals:
+        if i <= busy_until:
+            continue
+        r = resolve_fill(arr, i, d, cfg, cost, fill_offset_atr)
+        if r is None:
+            continue
+        r["idx"], r["dir"] = i, d
+        out.append(r)
+        if r["status"] in ("tp", "sl", "time"):
+            busy_until = r["exit_idx"] + cfg.cooldown_bars
+    return out
+
+
+def _blocks(rows, block_days, rng, draws):
+    """Shared machinery for the bootstraps: yield (start, end) epoch windows."""
+    ts = np.array([r[0].value for r in rows])
+    span = ts.max() - ts.min()
+    width = pd.Timedelta(days=block_days).value
+    per = max(1, round(span / width))
+    for _ in range(draws):
+        starts = ts.min() + rng.random(per) * span
+        yield starts, starts + width
+
+
+def _rate_in(wins, times, starts, ends, span, t0):
+    """Pooled hit rate over the drawn windows, wrapping at the end of the sample."""
+    t2 = np.concatenate([times, times + span])
+    w2 = np.concatenate([wins, wins])
+    tot = hit = 0
+    for a, b in zip(np.searchsorted(t2, starts), np.searchsorted(t2, ends)):
+        hit += int(w2[a:b].sum())
+        tot += b - a
+    return (hit / tot) if tot else np.nan
+
+
+def paired_bootstrap(a_rows, b_rows, block_days=28, iters=4000, seed=17):
+    """Resample time once per draw and measure BOTH arms in the same blocks.
+
+    This is the interval the verdict rests on. Measuring the arms in independent
+    resamples would ignore that they share market conditions, which is the whole
+    reason a time-shifted placebo is the right null.
+
+    Returns (lo, hi) for (a - b).
+    """
+    if not a_rows or not b_rows:
+        return float("nan"), float("nan")
+    ta = np.sort(np.array([r[0].value for r in a_rows]))
+    order_a = np.argsort([r[0].value for r in a_rows])
+    wa = np.array([bool(a_rows[i][1]) for i in order_a])
+    order_b = np.argsort([r[0].value for r in b_rows])
+    tb = np.sort(np.array([r[0].value for r in b_rows]))
+    wb = np.array([bool(b_rows[i][1]) for i in order_b])
+
+    t0 = min(ta.min(), tb.min())
+    span = max(ta.max(), tb.max()) - t0
+    rng = np.random.default_rng(seed)
+    draws = []
+    for starts, ends in _blocks(a_rows, block_days, rng, iters):
+        ra = _rate_in(wa, ta, starts, ends, span, t0)
+        rb = _rate_in(wb, tb, starts, ends, span, t0)
+        if np.isfinite(ra) and np.isfinite(rb):
+            draws.append(ra - rb)
+    if not draws:
+        return float("nan"), float("nan")
+    return float(np.percentile(draws, 2.5)), float(np.percentile(draws, 97.5))
+
+
+def one_arm_bootstrap(rows, block_days=28, iters=4000, seed=17):
+    """Same block machinery, one arm. Returns (lo, hi)."""
+    if not rows:
+        return float("nan"), float("nan")
+    order = np.argsort([r[0].value for r in rows])
+    t = np.sort(np.array([r[0].value for r in rows]))
+    w = np.array([bool(rows[i][1]) for i in order])
+    span = t.max() - t.min()
+    rng = np.random.default_rng(seed)
+    draws = [r for starts, ends in _blocks(rows, block_days, rng, iters)
+             if np.isfinite(r := _rate_in(w, t, starts, ends, span, t.min()))]
+    if not draws:
+        return float("nan"), float("nan")
+    return float(np.percentile(draws, 2.5)), float(np.percentile(draws, 97.5))
+
+
+def block_shuffled_volume(real_1h: pd.DataFrame, n: int, seed: int) -> np.ndarray:
+    """Real 1H volume, shuffled in 7-day blocks and fitted to `n` bars.
+
+    Shuffling whole weeks keeps volume clustering -- the property V3's 3x rule
+    needs in order to fire at all -- while destroying any relationship between
+    volume and the synthetic prices it will be paired with.
+    """
+    v = real_1h["volume"].to_numpy()
+    blocks = [v[i:i + VOL_BLOCK_HOURS] for i in range(0, len(v), VOL_BLOCK_HOURS)]
+    blocks = [b for b in blocks if len(b) == VOL_BLOCK_HOURS]
+    rng = np.random.default_rng(seed)
+    out = []
+    while sum(len(b) for b in out) < n:
+        out.append(blocks[rng.integers(0, len(blocks))])
+    return np.concatenate(out)[:n]
+
+
+def synthetic_arm(real_1h: pd.DataFrame, seed: int, cfg):
+    """Random-walk 1H prices carrying real, block-shuffled volume."""
+    df = synthetic(days=cfg.days, seed=seed).resample("1h", label="left", closed="left").agg(
+        {"open": "first", "high": "max", "low": "min",
+         "close": "last", "volume": "sum"}).dropna()
+    df["volume"] = block_shuffled_volume(real_1h, len(df), seed)
+    return df
+
+
+def stage1(cfg):
+    """Every Stage 1 quantity, computed before anything about V3 is printed."""
+    touch = {"rows": [], "by_sym": {}, "be": [], "ps": []}
+    strict = {"rows": [], "signals": 0, "fills": 0}
+    plac = {"rows": []}
+    reals = {}
+
+    for i, symbol in enumerate(cfg.symbols):
+        df = load(symbol, cfg, False, i)
+        reals[symbol] = df
+        f = build_features(df, cfg)
+        ct = f["close_time"]
+        sigs = v3_vwap_climax(f, cfg)
+
+        outs = evaluate_fill(f, sigs, cfg, symbol, 0.0)
+        traded = [r for r in outs if r["status"] in ("tp", "sl", "time")]
+        rows = [(ct.iloc[r["idx"]], bool(r["win"])) for r in traded]
+        touch["rows"] += rows
+        touch["by_sym"][symbol] = rows
+        touch["be"] += [required_rate(f, r["idx"], cfg, symbol) for r in traded]
+        touch["ps"] += [min_tradeable_rate(f, r["idx"], cfg, symbol) for r in traded]
+
+        s_outs = evaluate_fill(f, sigs, cfg, symbol, FILL_OFFSET_ATR)
+        s_traded = [r for r in s_outs if r["status"] in ("tp", "sl", "time")]
+        strict["rows"] += [(ct.iloc[r["idx"]], bool(r["win"])) for r in s_traded]
+        strict["signals"] += len(sigs)
+        strict["fills"] += len(s_traded)
+
+        for sh in SHIFTS:
+            p_outs = evaluate_fill(f, shifted_signals(sigs, len(f), sh), cfg, symbol, 0.0)
+            plac["rows"] += [(ct.iloc[r["idx"]], bool(r["win"]))
+                             for r in p_outs if r["status"] in ("tp", "sl", "time")]
+        print(f"  {symbol.split('/')[0]:<5} computed", flush=True)
+
+    # --- synthetic falsification (Change 4)
+    syn_rows, syn_plac, syn_sigs, syn_be = [], [], 0, []
+    for k, seed in enumerate(SYN_SEEDS):
+        symbol = cfg.symbols[k % len(cfg.symbols)]
+        df = synthetic_arm(reals[symbol], seed, cfg)
+        f = build_features(df, cfg)
+        ct = f["close_time"]
+        sigs = v3_vwap_climax(f, cfg)
+        syn_sigs += len(sigs)
+        outs = evaluate_fill(f, sigs, cfg, symbol, 0.0)
+        traded = [r for r in outs if r["status"] in ("tp", "sl", "time")]
+        syn_rows += [(ct.iloc[r["idx"]], bool(r["win"])) for r in traded]
+        syn_be += [required_rate(f, r["idx"], cfg, symbol) for r in traded]
+        for sh in SHIFTS:
+            p_outs = evaluate_fill(f, shifted_signals(sigs, len(f), sh), cfg, symbol, 0.0)
+            syn_plac += [(ct.iloc[r["idx"]], bool(r["win"]))
+                         for r in p_outs if r["status"] in ("tp", "sl", "time")]
+    print(f"  synthetic: {syn_sigs} signals", flush=True)
+
+    return touch, strict, plac, (syn_rows, syn_plac, syn_sigs, syn_be)
+
+
+def rate(rows):
+    return (sum(w for _, w in rows) / len(rows)) if rows else float("nan")
+
+
+def report_stage1(cfg):
+    touch, strict, plac, (syn_rows, syn_plac, syn_sigs, syn_be) = stage1(cfg)
+
+    be = float(np.nanmean(touch["be"]))
+    p_star = float(np.nanmean(touch["ps"]))
+    hit = rate(touch["rows"])
+    lo, hi = one_arm_bootstrap(touch["rows"])
+    d_lo, d_hi = paired_bootstrap(touch["rows"], plac["rows"])
+
+    # condition 4: leave one symbol out
+    loo = {}
+    for symbol, rows in touch["by_sym"].items():
+        keep = [r for s, rs in touch["by_sym"].items() if s != symbol for r in rs]
+        loo[symbol] = one_arm_bootstrap(keep)[0]
+
+    # synthetic gate
+    syn_hit, syn_be_m = rate(syn_rows), float(np.nanmean(syn_be)) if syn_be else float("nan")
+    syn_lo = one_arm_bootstrap(syn_rows)[0] if syn_rows else float("nan")
+    syn_d_lo = paired_bootstrap(syn_rows, syn_plac)[0] if syn_rows else float("nan")
+    syn_fired = syn_sigs >= SYN_MIN_SIGNALS
+    syn_passed = bool(syn_fired and syn_lo > syn_be_m and syn_d_lo > 0)
+
+    s_hit, s_lo = rate(strict["rows"]), one_arm_bootstrap(strict["rows"])[0]
+    s_dlo = paired_bootstrap(strict["rows"], plac["rows"])[0]
+
+    c2 = lo > be
+    c3 = d_lo > 0
+    c4 = all(v > be for v in loo.values())
+    c5 = syn_fired and not syn_passed
+    verdict = "PASS" if (c2 and c3 and c4 and c5) else "FAIL"
+    strict_ok = (s_lo > be) and (s_dlo > 0)
+    if verdict == "PASS" and not strict_ok:
+        verdict = "PASS (FILL-DEPENDENT)"
+
+    print("\n" + "=" * 78)
+    print("STAGE 1 -- V3 on 1H, edge gate (REAL DATA)")
+    print("=" * 78)
+    print(f"  pooled hit rate            {hit:>8.2%}  on {len(touch['rows']):,} trades")
+    print(f"  block bootstrap 95%        [{lo:.2%}, {hi:.2%}]  (28-day blocks)")
+    print(f"  pooled break-even          {be:>8.2%}")
+    print(f"  pooled p* (+0.08R)         {p_star:>8.2%}   <- Stage 2's bar, not Stage 1's")
+    print(f"  placebo baseline           {rate(plac['rows']):>8.2%}  on {len(plac['rows']):,} trades")
+    print(f"  paired difference 95%      [{d_lo:+.2%}, {d_hi:+.2%}]")
+
+    print(f"\n  {'condition':<52} {'result'}")
+    print(f"  {'1. Stage 0b satisfied':<52} PASS (947 >= 435)")
+    print(f"  {'2. bootstrap lower bound > break-even':<52} {'PASS' if c2 else 'FAIL'}"
+          f"   ({lo:.2%} vs {be:.2%})")
+    print(f"  {'3. paired difference entirely above zero':<52} {'PASS' if c3 else 'FAIL'}"
+          f"   (lo {d_lo:+.2%})")
+    print(f"  {'4. survives leave-one-symbol-out':<52} {'PASS' if c4 else 'FAIL'}")
+    print(f"  {'5. synthetic fired and failed':<52} {'PASS' if c5 else 'FAIL'}"
+          f"   ({syn_sigs} signals)")
+    print(f"\n  VERDICT: {verdict}")
+
+    print(f"\n  leave-one-out lower bounds (break-even {be:.2%}):")
+    for symbol, v in sorted(loo.items(), key=lambda kv: kv[1]):
+        print(f"    without {symbol.split('/')[0]:<5} {v:>7.2%}  {'ok' if v > be else 'FLIPS'}")
+
+    print(f"\n  strict fill ({FILL_OFFSET_ATR} ATR through the limit):")
+    print(f"    fill rate {strict['fills'] / strict['signals']:.1%}  "
+          f"({strict['fills']:,} of {strict['signals']:,})   hit {s_hit:.2%}   "
+          f"lower bound {s_lo:.2%}   paired lo {s_dlo:+.2%}")
+    print(f"    conditions 2 and 3 under strict fill: {'PASS' if strict_ok else 'FAIL'}")
+
+    print(f"\n  synthetic falsification: {syn_sigs} signals "
+          f"({'fired' if syn_fired else f'INCONCLUSIVE, under {SYN_MIN_SIGNALS}'})")
+    if syn_rows:
+        print(f"    hit {syn_hit:.2%} vs break-even {syn_be_m:.2%}, "
+              f"lower bound {syn_lo:.2%}, paired lo {syn_d_lo:+.2%} "
+              f"-> {'PASSED (BUG)' if syn_passed else 'failed, as required'}")
+
+    print(f"\n  block-length sweep (lower bound vs break-even {be:.2%}):")
+    for bd in (7, 28, 90):
+        b_lo = one_arm_bootstrap(touch["rows"], block_days=bd)[0]
+        p_lo = paired_bootstrap(touch["rows"], plac["rows"], block_days=bd)[0]
+        print(f"    {bd:>3}-day   lower bound {b_lo:>7.2%}  paired lo {p_lo:>+7.2%}  "
+              f"{'ok' if b_lo > be and p_lo > 0 else 'conclusion changes'}")
+
+    tuned = [r for s in cfg.tuned_on if s in touch["by_sym"] for r in touch["by_sym"][s]]
+    other = [r for s, rs in touch["by_sym"].items() if s not in cfg.tuned_on for r in rs]
+    print(f"\n  provenance split (information only):")
+    print(f"    parameters chosen on these 4: {rate(tuned):.2%} on {len(tuned):,} trades")
+    print(f"    the other 8:                  {rate(other):.2%} on {len(other):,} trades")
+
+    print(f"\n  the direct answer: V3's 1H edge over placebo is "
+          f"{100 * (hit - rate(plac['rows'])):+.1f} pp. Tradeable needs the hit rate at "
+          f"{p_star:.1%};")
+    print(f"  it is {hit:.2%}, so V3 is "
+          f"{'above' if hit >= p_star else 'below'} the Stage 2 bar"
+          f"{'' if hit >= p_star else f' by {100 * (p_star - hit):.1f} pp'}.")
