@@ -141,20 +141,29 @@ def test_round_trip_cost_matches_the_spec_table():
           f"(spec quotes 0.34-0.42%; the others sit above it)")
 
 
-def test_benchmark_must_be_set_before_stage_1():
-    """Spec section 3 makes B an owner decision recorded before any result. A
-    default would quietly become the bar the study is judged against."""
+def test_benchmark_guard_refuses_an_unset_value():
+    """Spec section 3 makes B an owner decision recorded before any result.
+
+    This originally asserted the field was None. The owner has since recorded
+    B = 5%, so that assertion would now fail for the right reason -- the decision
+    was made. What still needs protecting is the guard: Stage 1 must refuse to
+    run if the value is ever cleared or a future config ships without it.
+    """
     cfg = CarryConfig()
-    assert cfg.benchmark_annual_pct is None, "a benchmark default has crept in"
+    assert cfg.benchmark_annual_pct is not None, (
+        "B is unset; Stage 1 cannot be judged without it (spec section 3)")
+    assert 0 < cfg.benchmark_annual_pct < 100, "B is not a plausible annual percentage"
+    assert abs(cfg.require_benchmark() - cfg.benchmark_annual_pct / 100) < 1e-12
+
+    unset = CarryConfig(benchmark_annual_pct=None)
     try:
-        cfg.require_benchmark()
+        unset.require_benchmark()
     except ValueError as e:
         assert "section 3" in str(e)
     else:
         raise AssertionError("require_benchmark() did not refuse an unset benchmark")
-    cfg.benchmark_annual_pct = 4.5
-    assert abs(cfg.require_benchmark() - 0.045) < 1e-12
-    print("ok  Stage 1 refuses to run until the owner records B")
+    print(f"ok  B recorded at {cfg.benchmark_annual_pct}%/yr, and the guard still "
+          f"refuses an unset value")
 
 
 def test_funding_alignment_never_reads_a_later_candle():
@@ -189,6 +198,6 @@ if __name__ == "__main__":
     test_c2_respects_cost_hurdles()
     test_per_8h_normalises_changed_intervals()
     test_round_trip_cost_matches_the_spec_table()
-    test_benchmark_must_be_set_before_stage_1()
+    test_benchmark_guard_refuses_an_unset_value()
     test_funding_alignment_never_reads_a_later_candle()
     test_interval_hours_keeps_the_first_payment()

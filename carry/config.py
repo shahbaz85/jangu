@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 @dataclass
 class CarryConfig:
     # --- benchmark: MUST be set by the owner before Stage 1 (spec section 3)
-    benchmark_annual_pct: float | None = None
+    benchmark_annual_pct: float | None = 5.0   # owner decision, recorded 2026-09-21
 
     # --- universe
     symbols: tuple = ("BTC", "ETH", "BNB", "SOL", "XRP", "DOGE",
