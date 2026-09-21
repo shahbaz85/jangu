@@ -288,8 +288,6 @@ def main():
     print("  Stage 2 a long way off.")
 
 
-if __name__ == "__main__":
-    main()
 
 
 # =============================================================================
@@ -605,3 +603,6 @@ def report_stage1(cfg):
     print(f"  it is {hit:.2%}, so V3 is "
           f"{'above' if hit >= p_star else 'below'} the Stage 2 bar"
           f"{'' if hit >= p_star else f' by {100 * (p_star - hit):.1f} pp'}.")
+
+if __name__ == "__main__":
+    main()

@@ -236,6 +236,32 @@ def test_block_shuffled_volume_keeps_the_distribution():
           f"({spike_src:.3%} real -> {spike_got:.3%} shuffled)")
 
 
+def test_entry_points_resolve():
+    """Every name main() dispatches to must exist by the time main() runs.
+
+    This caught a real failure: Stage 1 was appended after the
+    `if __name__ == "__main__"` guard, so the guard executed while those
+    definitions were still ahead of it and --stage1 died with a NameError.
+    Importing the module is not enough to catch that -- the guard's position
+    in the file is what matters.
+    """
+    import mr70.v3_1h as mod
+
+    for name in ("main", "report_stage1", "stage1", "evaluate_fill", "resolve_fill",
+                 "paired_bootstrap", "one_arm_bootstrap", "synthetic_arm",
+                 "block_shuffled_volume", "min_tradeable_rate", "two_arm_n"):
+        assert callable(getattr(mod, name, None)), f"{name} is not defined at module level"
+
+    src = pathlib.Path(mod.__file__).read_text()
+    guard = 'if __name__ == "__main__":'
+    assert src.count(guard) == 1, "more than one __main__ guard"
+    after = src[src.index(guard) + len(guard):]
+    assert not any(line.startswith("def ") for line in after.splitlines()), (
+        "definitions appear after the __main__ guard, so they will not exist "
+        "when main() runs")
+    print(f"ok  entry points resolve and nothing is defined after the __main__ guard")
+
+
 if __name__ == "__main__":
     test_config_converts_windows_by_time()
     test_slippage_split_matches_spec()
@@ -249,3 +275,4 @@ if __name__ == "__main__":
     test_paired_bootstrap_coverage_is_declared()
     test_strict_fill_discriminates_at_the_boundary()
     test_block_shuffled_volume_keeps_the_distribution()
+    test_entry_points_resolve()
