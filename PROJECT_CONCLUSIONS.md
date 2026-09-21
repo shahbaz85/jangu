@@ -16,7 +16,7 @@ common outcome:
 |---|---|---|---|
 | **SMC 15m** | 17 signals, 8 symbols, 2 years | 5 trades, −4.09R | Too rare to measure. Not disproven — unmeasurable. |
 | **EMA pullback (trend)** | 1,364 trades | −0.218R per trade | Large clean sample, clearly negative. A trailing stop changed nothing. |
-| **MR-70 V3 (15m)** | ~500 trades | 72.8% win rate, −0.029R per trade | Gross expectancy about zero — enough edge to reach break-even *before* costs, not after. Edge over control +3.4 pp, now under audit (§3). |
+| **MR-70 V3 (15m)** | 446 trades | 72.87% vs 74.97% required | Gross expectancy about zero — reaches break-even *before* costs, not after. Edge over a construction-matched null +2.55 pp [−2.40, +7.52]: unsupported, not refuted (§3). |
 | **MR-70 V3 (1H)** | 947 trades | 68.95% hit vs 74.47% required | Closed. Below its placebo (69.97%); paired difference −1.0 pp [−5.45, +3.56]. |
 | **Strategy A / B** | B: 1,187 trades | 48.3% vs 53.8% required | Measured below break-even, and below its zero-cost line at the point estimate. |
 
@@ -80,11 +80,40 @@ bootstrap interval below it, and a paired difference against a time-shifted plac
 −1.0 pp [−5.45, +3.56]. Robust across block lengths and unchanged under a strict fill
 model. Full detail in `V3_1H_STAGE1_RESULT.md`.
 
-**The +3.4 pp figure is under audit.** It was measured against V0, a random control that
-does not match V3's entry and stop construction. The Strategy B diagnostics later showed
-such a control measures geometry rather than edge, flattering the cascade by 7 pp on data
-with no edge in it. `mr70/v3_15m_audit.py` re-runs the comparison against the
-construction-matched placebo; the result belongs here once it exists.
+**The edge figure was audited against a better null, and it did not survive intact.**
+V3's advantage had been measured against V0, a random control that does not match V3's
+entry and stop construction — the kind the Strategy B diagnostics showed measures geometry
+rather than edge. Re-run against the construction-matched time-shifted placebo
+(`mr70/v3_15m_audit.py`, same signal, geometry, costs, symbols and cached data):
+
+| | |
+|---|---|
+| V3 | 72.87% on 446 trades (reproduces the original 72.80%) |
+| time-shifted placebo | 70.32% on 529 trades |
+| V0 random control | 68.77% on 6,910 trades |
+| V3 − V0 | **+4.10 pp** |
+| V3 − placebo | **+2.55 pp**, 95% [−2.40, +7.52] |
+| pooled break-even | 74.97% |
+
+Three statements, in decreasing order of how firmly they hold.
+
+**Established:** 1.55 pp of the 4.10 pp — **38% of it** — disappears when the null is
+construction-matched. That much of the original figure was the control, not V3.
+
+**Not established either way:** whether the remaining +2.55 pp is real. The interval spans
+zero, but it also contains +3.4 and +4.1, so it argues against neither. Power to detect an
+effect that size at these arm sizes is **14%**; resolving it would need roughly 4,900
+trades per arm against the 446 / 529 available. This is *unsupported*, not refuted — the
+same distinction the Strategy B work had to make, and it cuts the same way here.
+
+**Not in doubt:** V3 at 72.87% sits 2.10 pp below its own 74.97% break-even, with a 95%
+lower bound 7.35 pp below it. Whether or not an edge exists, it is not a tradeable one, and
+the 15m conclusion is unchanged.
+
+The audit's own pre-registered reading rule called a zero-spanning interval "not a real
+edge". That rule conflates absence of evidence with evidence of absence, so it is reported
+here as unsupported instead; `mr70/v3_15m_audit.py` was corrected to report power rather
+than deliver that verdict.
 
 Two follow-ups sharpened it. On fresh symbols with **larger geometry** it inverted and
 failed. On fresh symbols with the **original geometry** it held at +3.40 pp. So the edge

@@ -21,6 +21,8 @@ import pathlib
 import sys
 
 import numpy as np
+from math import sqrt
+from statistics import NormalDist
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
@@ -105,20 +107,41 @@ def main():
           f"{'clears' if v3_lo > be_m else 'below'}")
 
     print("\n" + "-" * 78)
-    if all(verdicts) and (h3 - hp) > 0.02:
+    # An interval spanning zero does not establish that the edge is absent -- it
+    # establishes that this sample cannot resolve it. Reporting the power makes
+    # the difference visible instead of hiding it behind a verdict word.
+    nd = NormalDist()
+    d = h3 - hp
+    se = sqrt(h3 * (1 - h3) / len(v3) + hp * (1 - hp) / len(plac))
+    power = 1 - nd.cdf(nd.inv_cdf(0.975) - d / se) if se > 0 else float("nan")
+    need = ((nd.inv_cdf(0.975) + nd.inv_cdf(0.80)) ** 2
+            * (h3 * (1 - h3) + hp * (1 - hp)) / d ** 2) if d else float("inf")
+
+    if all(verdicts):
         print("  RESULT: the original claim STANDS. V3 beats a construction-matched")
-        print("  null by a margin comparable to the V0 figure, so V0 was a fair null.")
+        print("  null at every block length, so V0 was a fair null for this strategy.")
     elif not any(verdicts):
-        print("  RESULT: the original +3.4 pp was NOT a real edge. Against a null that")
-        print("  matches V3's construction, the difference is indistinguishable from")
-        print("  zero. V0 was measuring geometry, not edge, exactly as the Strategy B")
-        print("  diagnostics found for the cascade's control.")
+        print(f"  RESULT: UNSUPPORTED, not refuted. V3 - placebo is {100 * d:+.2f} pp with")
+        print(f"  an interval spanning zero, so this sample cannot tell a real edge from")
+        print(f"  none. Power to detect an effect of that size here is only {power:.0%};")
+        print(f"  resolving it would need about {need:,.0f} trades per arm against "
+              f"{len(v3):,} / {len(plac):,}.")
+        print(f"  The interval contains zero AND the originally claimed figure, so it")
+        print(f"  argues against neither.")
     else:
         print("  RESULT: mixed -- the interval's sign depends on block length, so the")
-        print("  comparison is not robust. Treat the original claim as unsupported")
-        print("  rather than refuted.")
+        print("  comparison is not robust either way.")
+
+    shift = (h3 - h0) - d
+    print(f"\n  What IS established: of the {100 * (h3 - h0):+.2f} pp V3 shows over V0,")
+    print(f"  {100 * shift:.2f} pp ({shift / (h3 - h0):.0%}) disappears when the null is")
+    print(f"  construction-matched. That much of the original figure was the null, not V3.")
+    print(f"\n  What is not in doubt: V3 at {h3:.2%} sits {100 * (h3 - be_m):+.2f} pp below")
+    print(f"  its own break-even of {be_m:.2%}, with a lower bound {100 * (v3_lo - be_m):.2f} pp")
+    print(f"  below it. Whether or not an edge exists, it is not a tradeable one.")
+
     print(f"\n  For the record: V3 - V0 = {100 * (h3 - h0):+.2f} pp, "
-          f"V3 - placebo = {100 * (h3 - hp):+.2f} pp "
+          f"V3 - placebo = {100 * d:+.2f} pp "
           f"[{lo28:+.2%}, {hi28:+.2%}] at 28-day blocks.")
 
 
