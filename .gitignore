@@ -14,3 +14,4 @@ news.csv
 mr70/paper_state.json
 mr70/paper_*.csv
 mr70/_t_*
+carry_cache/
