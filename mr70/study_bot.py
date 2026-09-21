@@ -28,7 +28,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from mr70.config import MR70Config                      # noqa: E402
 from mr70.indicators import build_features              # noqa: E402
-from mr70.paper_live import fetch_with_retry, notify    # noqa: E402
+from mr70.paper_live import fetch_with_retry            # noqa: E402
 from mr70.signals import v3_vwap_climax                 # noqa: E402
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -50,6 +50,50 @@ COLUMNS = ["#", "date_utc", "time_utc", "symbol", "side", "signal_entry_price",
            "paper_fill_traded_through", "my_exit_price", "my_exit_time",
            "my_exit_reason", "bot_rule_exit_price", "bot_exit_reason",
            "touch_fill", "rule_R"]
+
+
+SETUP_HINT = (
+    "Set them, then open a NEW PowerShell window (they are read at startup):\n"
+    '  [Environment]::SetEnvironmentVariable("TELEGRAM_BOT_TOKEN", "123456:AA...", "User")\n'
+    '  [Environment]::SetEnvironmentVariable("TELEGRAM_CHAT_ID",   "987654321",   "User")')
+
+
+def telegram_send(text: str):
+    """Send one message. Returns (ok, reason).
+
+    Reports failure honestly rather than swallowing it: an unset variable, a
+    network error and a Telegram API rejection are three different problems and
+    a silent no-op looks like all three at once. Telegram answers every call
+    with an `ok` field, so a 200 alone is not proof of delivery.
+    """
+    token, chat = os.getenv("TELEGRAM_BOT_TOKEN"), os.getenv("TELEGRAM_CHAT_ID")
+    if not token or not chat:
+        missing = [n for n, v in (("TELEGRAM_BOT_TOKEN", token),
+                                  ("TELEGRAM_CHAT_ID", chat)) if not v]
+        return False, f"not configured: {', '.join(missing)} unset"
+    try:
+        import requests
+        r = requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
+                          data={"chat_id": chat, "text": text}, timeout=10)
+        body = r.json()
+        if not body.get("ok"):
+            return False, f"Telegram rejected it: {body.get('description', r.text[:120])}"
+        return True, ""
+    except Exception as e:                                       # noqa: BLE001
+        return False, f"{type(e).__name__}: {e}"
+
+
+_warned = {"telegram": False}
+
+
+def notify(text: str):
+    """Print, then send. A send failure is logged loudly once, then quietly."""
+    print(text, flush=True)
+    ok, why = telegram_send(text)
+    if not ok and not _warned["telegram"]:
+        print(f"  !! Telegram not delivering ({why}). Alerts are console-only.\n"
+              f"{SETUP_HINT}", flush=True)
+        _warned["telegram"] = True
 
 
 def both_times(ts: pd.Timestamp) -> str:
@@ -301,13 +345,20 @@ def main():
     cfg = MR70Config()
 
     if args.test_message:
-        notify("MR-70 V3 paper study bot: test message. Signals only, no orders.")
-        print("test message sent (check Telegram)")
-        return
+        ok, why = telegram_send(
+            "MR-70 V3 paper study bot: test message. Signals only, no orders.")
+        if ok:
+            print("Telegram accepted the message -- check your chat.")
+            return
+        print(f"NOT SENT -- {why}\n{SETUP_HINT}")
+        sys.exit(1)
 
-    if not (os.getenv("TELEGRAM_BOT_TOKEN") and os.getenv("TELEGRAM_CHAT_ID")):
-        print("WARNING: Telegram variables are not set; alerts will be skipped.",
-              flush=True)
+    ok, why = telegram_send("MR-70 V3 paper study bot starting. Signals only.")
+    if not ok:
+        print(f"WARNING: Telegram is not delivering ({why}).\n"
+              f"The bot will run and write the CSV, but you will get no alerts.\n"
+              f"{SETUP_HINT}\n", flush=True)
+        _warned["telegram"] = True
 
     st = load_state()
     print(f"watching {', '.join(s.split('/')[0] for s in SYMBOLS)} on 15m; "

@@ -3,6 +3,7 @@
 If a test fails, fix the bug, not the test.
 """
 import json
+import os
 import pathlib
 import re
 import sys
@@ -202,9 +203,37 @@ def test_no_order_code_anywhere():
     print(f"ok  no order-placing or private-API code in {len(files)} bot files")
 
 
+def test_telegram_failure_is_never_reported_as_success():
+    """A send that did not happen must not be reported as one.
+
+    The first version printed "test message sent (check Telegram)" whenever the
+    variables were unset, which would have let a silent no-op pass for working
+    alerts -- the one failure mode that makes the whole bot useless without
+    looking broken.
+    """
+    saved = {k: os.environ.pop(k, None)
+             for k in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID")}
+    try:
+        ok, why = bot.telegram_send("unit test")
+        assert ok is False, "an unconfigured send reported success"
+        assert "unset" in why, f"unhelpful reason: {why!r}"
+
+        os.environ["TELEGRAM_BOT_TOKEN"] = "x"
+        ok, why = bot.telegram_send("unit test")
+        assert ok is False and "TELEGRAM_CHAT_ID" in why, (
+            f"a half-configured send should name what is missing, got {why!r}")
+    finally:
+        os.environ.pop("TELEGRAM_BOT_TOKEN", None)
+        for k, v in saved.items():
+            if v is not None:
+                os.environ[k] = v
+    print("ok  an undelivered Telegram message is reported as a failure, not a send")
+
+
 if __name__ == "__main__":
     test_backtest_parity()
     test_never_signals_on_a_forming_candle()
     test_restart_loses_nothing_and_duplicates_nothing()
     test_outcome_tracker_matches_the_backtest()
     test_no_order_code_anywhere()
+    test_telegram_failure_is_never_reported_as_success()
