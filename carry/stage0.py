@@ -29,7 +29,10 @@ def monthly_funding_returns(aligned, hours, cfg) -> pd.Series:
     result, which Stage 0 is forbidden to produce. It exists to estimate how
     variable a monthly carry return is, which is what sets the detectable effect.
     """
-    s = pd.Series(aligned["rate"].to_numpy(), index=aligned.index)
+    # to_period() drops the timezone and warns about it; UTC is already the only
+    # zone in play, so drop it deliberately rather than letting pandas complain
+    idx = aligned.index.tz_convert("UTC").tz_localize(None)
+    s = pd.Series(aligned["rate"].to_numpy(), index=idx)
     return s.groupby(s.index.to_period("M")).sum() / cfg.capital_multiple()
 
 
@@ -139,6 +142,16 @@ def main():
             sel = m[[p.year == y for p in m.index]]
             cells.append(f"{sel.sum():>7.2%}/{len(sel):>2}m" if len(sel) else f"{'-':>10}")
         print(f"  {sym:<5} " + " ".join(f"{c:>14}" for c in cells))
+
+    print("\n  --- gross funding yield, before costs, basis and liquidations ---")
+    for sym, m in sorted(monthly_all.items(), key=lambda kv: -kv[1].mean()):
+        ann = (1 + m.mean()) ** 12 - 1
+        full = [y for y in {p.year for p in m.index}
+                if sum(1 for p in m.index if p.year == y) == 12]
+        worst = min((m[[p.year == y for p in m.index]].sum() for y in full), default=float("nan"))
+        print(f"    {sym:<5} {ann:>7.2%}/yr   worst full year {worst:>8.2%}")
+    print("  This is funding only. It is not C0: costs, basis moves, weekly rebalancing")
+    print("  and liquidation losses all come out of it in Stage 1.")
 
     print("\n  --- minimum detectable difference (spec section 9.5) ---")
     if not monthly_all:

@@ -18,6 +18,26 @@ from data import fetch_ohlcv, load_csv, save_csv        # noqa: E402
 CACHE = pathlib.Path("carry_cache")
 
 
+def with_retry(fn, *a, tries: int = 4, **kw):
+    """Retry a fetch on transient network errors, backing off 2s, 4s, 8s.
+
+    A RequestTimeout is not a data check failure -- losing a symbol to one would
+    report an exchange listing gap that does not exist.
+    """
+    for attempt in range(tries):
+        try:
+            return fn(*a, **kw)
+        except Exception as e:                        # noqa: BLE001
+            transient = any(k in type(e).__name__ for k in
+                            ("Timeout", "Network", "DDoSProtection", "ExchangeNotAvailable"))
+            if not transient or attempt == tries - 1:
+                raise
+            wait = 2 ** (attempt + 1)
+            print(f"    {type(e).__name__}, retrying in {wait}s "
+                  f"({attempt + 1}/{tries - 1})...", flush=True)
+            time.sleep(wait)
+
+
 def _cache(name: str) -> pathlib.Path:
     CACHE.mkdir(exist_ok=True)
     return CACHE / name
@@ -54,7 +74,7 @@ def funding(symbol: str, cfg) -> pd.DataFrame:
         df.index = pd.to_datetime(df.pop(df.columns[0]), utc=True)
         return df[["rate"]].astype(float).sort_index()
     print(f"  fetching {symbol} funding...", flush=True)
-    df = fetch_funding(f"{symbol}/USDT:USDT", cfg.days, cfg.perp_exchange)
+    df = with_retry(fetch_funding, f"{symbol}/USDT:USDT", cfg.days, cfg.perp_exchange)
     df.to_csv(path, index_label="time")
     return df
 
@@ -67,7 +87,7 @@ def candles(symbol: str, cfg, leg: str) -> pd.DataFrame:
     market = f"{symbol}/USDT" if leg == "spot" else f"{symbol}/USDT:USDT"
     ex = cfg.spot_exchange if leg == "spot" else cfg.perp_exchange
     print(f"  fetching {symbol} {leg} 1h...", flush=True)
-    df = fetch_ohlcv(market, "1h", cfg.days, ex)
+    df = with_retry(fetch_ohlcv, market, "1h", cfg.days, ex)
     save_csv(df, path)
     return df
 
