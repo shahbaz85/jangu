@@ -29,9 +29,37 @@ Token comes from @BotFather, chat id from @userinfobot. Check it works:
 ```
 
 A message should arrive within a few seconds. If nothing comes, the variables are
-not set in this window — reopen PowerShell and try again.
+not set in this window — reopen PowerShell and try again. If PowerShell refuses to
+run the script at all, see **Running** below; you can test without it:
+
+```powershell
+.\.venv\Scripts\python.exe mr70\study_bot.py --test-message
+```
 
 ## Running
+
+The bot runs directly, with no system settings to change:
+
+```powershell
+.\.venv\Scripts\python.exe mr70\study_bot.py --test-message   # check Telegram
+.\.venv\Scripts\python.exe mr70\study_bot.py                  # run it
+```
+
+`run_bot.ps1` adds automatic restarts on top. Windows blocks downloaded scripts
+by default, so it needs one of these first:
+
+```powershell
+# per run, changes nothing permanently
+powershell -ExecutionPolicy Bypass -File .\run_bot.ps1
+
+# or once, for your account only
+Unblock-File .\run_bot.ps1
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+```
+
+`RemoteSigned` lets local scripts run while still requiring downloaded ones to be
+unblocked or signed. It affects your account only and needs no admin rights, but
+it is a guardrail you are loosening — the direct-python route above avoids it.
 
 ```powershell
 .\run_bot.ps1
