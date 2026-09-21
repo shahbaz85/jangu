@@ -16,7 +16,8 @@ common outcome:
 |---|---|---|---|
 | **SMC 15m** | 17 signals, 8 symbols, 2 years | 5 trades, −4.09R | Too rare to measure. Not disproven — unmeasurable. |
 | **EMA pullback (trend)** | 1,364 trades | −0.218R per trade | Large clean sample, clearly negative. A trailing stop changed nothing. |
-| **MR-70 V3** | ~500 trades | 72.8% win rate, −0.029R per trade | A real edge, +3.4 pp over control — about 63% of what costs demand. |
+| **MR-70 V3 (15m)** | ~500 trades | 72.8% win rate, −0.029R per trade | Gross expectancy about zero — enough edge to reach break-even *before* costs, not after. Edge over control +3.4 pp, now under audit (§3). |
+| **MR-70 V3 (1H)** | 947 trades | 68.95% hit vs 74.47% required | Closed. Below its placebo (69.97%); paired difference −1.0 pp [−5.45, +3.56]. |
 | **Strategy A / B** | B: 1,187 trades | 48.3% vs 53.8% required | Measured below break-even, and below its zero-cost line at the point estimate. |
 
 The single most useful number in the whole project: **round-trip cost on 15m crypto
@@ -65,10 +66,25 @@ far longer history.
 1,364 trades, −0.218R per trade. A trailing stop after TP1 left it unchanged. This is the
 cleanest negative in the project: a large sample, a simple rule, and no ambiguity.
 
-### MR-70 V3 — a real edge, and not enough of one
+### MR-70 V3 — break-even before costs, and closed on 1H
 
 V3 won 72.80% of its trades and still lost 0.029R on each. Against its random control it
-was +3.4 pp — genuinely predictive, roughly **63% of the edge its costs require**.
+was +3.4 pp. The right way to state the 15m result is **gross expectancy about zero**: a
+72.80% hit rate against a 72.7% *pre-cost* break-even is enough edge to reach break-even
+before costs and not after. Calling it "63% of the edge its costs require" implied a
+measured fraction of a real edge, which overstates what was established.
+
+**V3 on 1H is closed.** Tested under `V3_1H_SPEC.md` and its addendum on twelve symbols
+over four years: 68.95% on 947 trades against a 74.47% break-even, with the whole
+bootstrap interval below it, and a paired difference against a time-shifted placebo of
+−1.0 pp [−5.45, +3.56]. Robust across block lengths and unchanged under a strict fill
+model. Full detail in `V3_1H_STAGE1_RESULT.md`.
+
+**The +3.4 pp figure is under audit.** It was measured against V0, a random control that
+does not match V3's entry and stop construction. The Strategy B diagnostics later showed
+such a control measures geometry rather than edge, flattering the cascade by 7 pp on data
+with no edge in it. `mr70/v3_15m_audit.py` re-runs the comparison against the
+construction-matched placebo; the result belongs here once it exists.
 
 Two follow-ups sharpened it. On fresh symbols with **larger geometry** it inverted and
 failed. On fresh symbols with the **original geometry** it held at +3.40 pp. So the edge
@@ -135,6 +151,12 @@ Changing it in response to results inside the same experiment is not.
 **Honest intervals.** Wilson assumes independent trades. Measured here, cross-symbol
 clustering was 0.91–1.17× — undetectable, so the intervals were close to honest. That was
 measured, not assumed, and the assumption going in had been 20–40%.
+
+**Model fills pessimistically.** A touch-based limit fill — filling when a bar's low
+reaches the limit — filled **100%** of V3's 1H signals. Requiring price to trade 0.05 ATR
+through the limit, which is closer to what queue position demands live, filled **70%**.
+That 30-point gap is the size of the optimism in every touch-fill backtest in this
+repository, and it is the figure the paper observer should be checked against.
 
 **Never tune toward the result.** Held throughout. Several results would have looked much
 better with one threshold moved, and none was moved.
