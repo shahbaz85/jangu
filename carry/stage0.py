@@ -76,6 +76,8 @@ def main():
         years_present = set(fund.index.year)
 
         aligned = align_to_funding(fund, spot, perp)
+        aligned_years = ((aligned.index[-1] - aligned.index[0]).days / 365.25
+                         if not aligned.empty else 0.0)
         r8 = per_8h(aligned["rate"].to_numpy(), hours.reindex(aligned.index).to_numpy())
         per_day = 24.0 / float(pd.Series(hours).round().mode().iloc[0])
         mean_daily = float(np.mean(aligned["rate"].to_numpy())) * per_day
@@ -86,15 +88,20 @@ def main():
         rise_1d = float((px / px.shift(24) - 1).max())
         rise_7d = float((px / px.shift(24 * 7) - 1).max())
 
-        ok = span_years >= cfg.min_years and cfg.must_include_year in years_present
+        # Only funding payments that have BOTH a spot and a perp price can be
+        # simulated, so the aligned span is the one that matters: five years of
+        # funding with two years of candles is not four usable years.
+        ok = (min(span_years, aligned_years) >= cfg.min_years
+              and cfg.must_include_year in years_present)
         if not ok:
-            excluded.append((sym, f"{span_years:.1f}y, 2022 "
+            excluded.append((sym, f"funding {span_years:.1f}y, usable {aligned_years:.1f}y, 2022 "
                                   f"{'present' if cfg.must_include_year in years_present else 'MISSING'}"))
         else:
             monthly_all[sym] = monthly_funding_returns(aligned, hours, cfg)
 
         rows.append({
             "sym": sym, "start": fund.index[0].date(), "years": span_years,
+            "aligned_years": aligned_years,
             "n": len(aligned), "interval_h": float(pd.Series(hours).round().mode().iloc[0]),
             "bad_gaps": bad_gaps, "mean8": float(np.mean(r8)), "median8": float(np.median(r8)),
             "neg_share": float(np.mean(aligned["rate"].to_numpy() < 0)),
@@ -108,11 +115,11 @@ def main():
     print("STAGE 0 -- funding-rate carry, descriptive and power")
     print("=" * 86)
 
-    print(f"\n  {'sym':<5} {'start':<11} {'yrs':>5} {'int':>4} {'gaps':>5} "
+    print(f"\n  {'sym':<5} {'start':<11} {'yrs':>5} {'use':>5} {'int':>4} {'gaps':>5} "
           f"{'mean/8h':>9} {'med/8h':>9} {'neg':>6} {'RT cost':>8} {'BE days':>8}")
     for r in rows:
         print(f"  {r['sym']:<5} {str(r['start']):<11} {r['years']:>5.1f} "
-              f"{r['interval_h']:>4.0f} {r['bad_gaps']:>5} {r['mean8']:>9.5%} "
+              f"{r['aligned_years']:>5.1f} {r['interval_h']:>4.0f} {r['bad_gaps']:>5} {r['mean8']:>9.5%} "
               f"{r['median8']:>9.5%} {r['neg_share']:>6.1%} {r['rt']:>8.2%} "
               f"{r['be_days']:>8.1f}")
 

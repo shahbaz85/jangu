@@ -28,7 +28,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from carry.config import CarryConfig                                       # noqa: E402
 from carry.engine import c1_positions, c2_selection, per_8h                # noqa: E402
-from carry.fetch import align_to_funding, candles, funding, interval_hours  # noqa: E402
+from carry.fetch import (CACHE, align_to_funding, candles,                 # noqa: E402
+                         funding, interval_hours)
 
 
 def leg_costs(cfg, sym):
@@ -224,22 +225,43 @@ def line(name, st, cfg, extra=""):
 def main():
     cfg = CarryConfig()
     B = cfg.require_benchmark()
-    data = {}
+    data, dropped = {}, []
+    print(f"  cache: {CACHE.resolve()}", flush=True)
     for sym in cfg.symbols:
         try:
-            fund, spot, perp = funding(sym, cfg), candles(sym, cfg, "spot"), candles(sym, cfg, "perp")
+            fund = funding(sym, cfg)
+            spot = candles(sym, cfg, "spot")
+            perp = candles(sym, cfg, "perp")
         except Exception as e:                                   # noqa: BLE001
-            print(f"  {sym}: unavailable ({type(e).__name__}) -- excluded", flush=True)
+            dropped.append((sym, f"{type(e).__name__}: {e}"))
             continue
-        if fund.empty or spot.empty or perp.empty:
+        empties = [n for n, df in (("funding", fund), ("spot", spot), ("perp", perp))
+                   if df.empty]
+        if empties:
+            dropped.append((sym, f"empty series: {', '.join(empties)}"))
             continue
         hours = interval_hours(fund)
         aligned = align_to_funding(fund, spot, perp)
-        if (aligned.index[-1] - aligned.index[0]).days / 365.25 < cfg.min_years:
-            print(f"  {sym}: under {cfg.min_years}y -- excluded", flush=True)
+        if aligned.empty:
+            dropped.append((sym, "no funding timestamp had both a spot and a perp price"))
+            continue
+        years = (aligned.index[-1] - aligned.index[0]).days / 365.25
+        if years < cfg.min_years:
+            dropped.append((sym, f"{years:.1f}y of history, under the {cfg.min_years}y minimum"))
             continue
         data[sym] = {"aligned": aligned, "perp": perp, "hours": hours}
-        print(f"  {sym} loaded", flush=True)
+        print(f"  {sym} loaded ({len(aligned):,} payments, {years:.1f}y)", flush=True)
+
+    if dropped:
+        print("\n  dropped:")
+        for sym, why in dropped:
+            print(f"    {sym:<5} {why}")
+    if not data:
+        raise SystemExit(
+            "\n  No symbol survived loading, so there is nothing to simulate.\n"
+            "  The reasons are listed above. If they are all fetch errors, run\n"
+            "  carry/stage0.py first to populate the cache, and check that you are\n"
+            f"  running from the directory containing {CACHE}/.")
 
     per_day = {s: 24.0 / float(pd.Series(d["hours"]).round().mode().iloc[0])
                for s, d in data.items()}
