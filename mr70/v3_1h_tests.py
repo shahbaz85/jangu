@@ -19,7 +19,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from mr70.indicators import build_features                              # noqa: E402
 from mr70.signals import v3_vwap_climax                                 # noqa: E402
-from mr70.v3_1h import V3OneHourConfig, required_rate, shifted_signals  # noqa: E402
+from mr70.v3_1h import (V3OneHourConfig, min_tradeable_rate,          # noqa: E402
+                        required_rate, shifted_signals, two_arm_n)
 
 
 def fixture(n=400, spike_at=300, seed=3):
@@ -123,6 +124,35 @@ def test_no_lookahead_in_1h_features():
     print(f"ok  1H features are causal ({len(cols)} columns, 3 truncation points)")
 
 
+def test_min_tradeable_rate_reduces_to_break_even():
+    """p* with edge_r=0 must equal the plain break-even, and must rise with the
+    edge demanded. If these drift apart, one of the two formulas is wrong."""
+    cfg = V3OneHourConfig()
+    f = build_features(fixture(), cfg)
+    i = v3_vwap_climax(f, cfg)[0][0]
+    be = required_rate(f, i, cfg, "BTC/USDT:USDT")
+    p0 = min_tradeable_rate(f, i, cfg, "BTC/USDT:USDT", edge_r=0.0)
+    assert abs(p0 - be) < 1e-12, f"p*(0) {p0:.6f} != break-even {be:.6f}"
+    rates = [min_tradeable_rate(f, i, cfg, "BTC/USDT:USDT", edge_r=e)
+             for e in (0.0, 0.04, 0.08, 0.15)]
+    assert rates == sorted(rates), "demanding more edge must demand a higher hit rate"
+    assert 0.78 < rates[2] < 0.84, f"p* at +0.08R is {rates[2]:.2%}, expected ~80-82%"
+    print(f"ok  p* reduces to break-even at 0R and rises with edge "
+          f"({be:.1%} -> {rates[2]:.1%} at +0.08R)")
+
+
+def test_two_arm_n_accounts_for_the_larger_placebo():
+    """The placebo runs four shifts, so ignoring the arm ratio overstates the
+    requirement -- which is exactly what made Stage 0's verdict too harsh."""
+    equal = two_arm_n(0.70, 0.80, ratio=1.0)
+    bigger = two_arm_n(0.70, 0.80, ratio=2.367)
+    assert bigger < equal, "a larger control arm must reduce the requirement"
+    assert two_arm_n(0.70, 0.80, ratio=1e9) < bigger, "an infinite control arm is cheapest"
+    assert two_arm_n(0.70, 0.70, ratio=2.0) == float("inf"), "a zero effect needs infinite n"
+    assert two_arm_n(0.70, 0.80, 2.367, power=0.90) > bigger, "more power costs more trades"
+    print(f"ok  two-arm sizing uses the arm ratio ({equal:.0f} equal -> {bigger:.0f} at 2.37x)")
+
+
 if __name__ == "__main__":
     test_config_converts_windows_by_time()
     test_slippage_split_matches_spec()
@@ -130,3 +160,5 @@ if __name__ == "__main__":
     test_shifted_placebo_preserves_construction()
     test_required_rate_is_sane_and_cost_ordered()
     test_no_lookahead_in_1h_features()
+    test_min_tradeable_rate_reduces_to_break_even()
+    test_two_arm_n_accounts_for_the_larger_placebo()

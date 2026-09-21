@@ -1,9 +1,19 @@
-"""Stage 0 of V3_1H_SPEC.md: can this test be run at all?
+"""Stage 0 and Stage 0b of V3_1H_SPEC.md (+ addendum): can this test be run at all?
 
 Counts V3 signals and filled trades on native 1H data, measures the placebo
 baseline, and compares the projected sample against what the hypothesis needs.
 Nothing here scores V3 against its requirement -- that is Stage 1, and the spec
 forbids running it unless Stage 0 clears.
+
+Stage 0b (addendum, Change 1) powers the test against the *smallest edge worth
+trading* rather than against break-even. Powering for break-even asks whether a
+strategy that earns nothing can be told apart from the placebo, and a strategy
+sitting exactly at break-even clears Stage 1's lower-bound condition only about
+2.5% of the time at any sample size. The addendum's target is Stage 2's own
++0.08R criterion, which is a strictly harder thing for V3 to achieve -- it just
+happens to need fewer trades to detect, because the effect is larger.
+
+Neither stage touches a V3 outcome, so the V3 arm stays unseen.
 
 The 15m V3 code and its results are untouched; this adds files only.
 
@@ -18,6 +28,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
+from math import sqrt
+from statistics import NormalDist
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
@@ -80,6 +92,43 @@ def required_rate(f, i: int, cfg, symbol: str) -> float:
     return (cfg.sl_atr + cl) / (cfg.tp_atr + cfg.sl_atr + cl - cw)
 
 
+def min_tradeable_rate(f, i: int, cfg, symbol: str, edge_r: float = 0.08) -> float:
+    """Hit rate at which this signal's expected return equals `edge_r` per trade.
+
+    In R units, with R the stop distance: a win pays (TP - cw)/SL and a loss
+    costs (SL + cl)/SL. Setting p(TP - cw)/SL - (1-p)(SL + cl)/SL = edge_r and
+    solving gives
+
+        p* = (edge_r*SL + SL + cl) / (TP - cw + SL + cl)
+
+    which reduces to the plain break-even when edge_r is 0.
+    """
+    a, px = f["atr"].to_numpy()[i], f["close"].to_numpy()[i]
+    if not (np.isfinite(a) and a > 0 and px > 0):
+        return float("nan")
+    unit = px / a
+    cw = (2 * cfg.maker_fee) * unit
+    cl = (cfg.maker_fee + cfg.taker_fee + cfg.slip_for(symbol)) * unit
+    return (edge_r * cfg.sl_atr + cfg.sl_atr + cl) / (cfg.tp_atr - cw + cfg.sl_atr + cl)
+
+
+def two_arm_n(p0: float, p1: float, ratio: float, power: float = 0.80,
+              alpha: float = 0.05) -> float:
+    """Trades needed in the smaller arm when the other arm is `ratio` times larger.
+
+    `trades_needed()` in shared/diagnostics.py assumes equal arms. The placebo
+    here runs four shifts and carries roughly 2.4x the V3 arm, and ignoring that
+    overstates the requirement -- which is what produced Stage 0's misleadingly
+    harsh verdict.
+    """
+    nd = NormalDist()
+    za, zb = nd.inv_cdf(1 - alpha / 2), nd.inv_cdf(power)
+    d = abs(p1 - p0)
+    if d == 0 or ratio <= 0:
+        return float("inf")
+    return (za + zb) ** 2 * (p1 * (1 - p1) + p0 * (1 - p0) / ratio) / d ** 2
+
+
 def shifted_signals(signals, n_bars: int, shift: int):
     """The time-shifted placebo: same direction, same construction, no alignment.
 
@@ -117,7 +166,7 @@ def main():
     cfg = V3OneHourConfig()
     tag = "SYNTHETIC" if args.synthetic else "REAL DATA"
 
-    per, be_all = {}, []
+    per, be_all, ps_all = {}, [], []
     pooled = {"signals": 0, "trades": 0, "wins": 0, "unfilled": 0, "years": 0.0}
     placebo = {"trades": 0, "wins": 0}
 
@@ -133,6 +182,9 @@ def main():
             b = required_rate(f, r["idx"], cfg, symbol)
             if np.isfinite(b):
                 be_all.append(b)
+            ps = min_tradeable_rate(f, r["idx"], cfg, symbol)
+            if np.isfinite(ps):
+                ps_all.append(ps)
 
         for sh in SHIFTS:
             p_outs, _ = evaluate(f, shifted_signals(sigs, len(f), sh), cfg, symbol)
@@ -197,6 +249,38 @@ def main():
         print("  is a new pre-registration decision for the owner, not a fix to make here.")
     else:
         print(f"\n  VERDICT: sample is sufficient -- Stage 1 may run.")
+
+    # ---- Stage 0b: power against the smallest edge worth trading -------------
+    p_star = float(np.mean(ps_all)) if ps_all else float("nan")
+    print("\n" + "=" * 78)
+    print(f"STAGE 0b -- power against the smallest tradeable edge ({tag})")
+    print("=" * 78)
+    print(f"  pooled break-even (earns nothing)        {p1:>7.2%}")
+    print(f"  pooled p* (+0.08R per trade)             {p_star:>7.2%}")
+    print(f"  placebo baseline                         {p0:>7.2%}")
+    if not np.isfinite(p_star) or p_star <= p1:
+        print("\n  VERDICT: cannot size -- p* is not above break-even.")
+        return
+
+    one = ((NormalDist().inv_cdf(0.975) * sqrt(p1 * (1 - p1))
+            + NormalDist().inv_cdf(0.80) * sqrt(p_star * (1 - p_star))) ** 2
+           / (p_star - p1) ** 2)
+    ratio = placebo["trades"] / pooled["trades"] if pooled["trades"] else float("nan")
+    two_arm = two_arm_n(p0, p_star, ratio)
+    need_b = max(one, two_arm)
+    print(f"\n  1. one-sample, H0 = break-even, true = p*  (+{100 * (p_star - p1):.1f} pp)"
+          f"   -> {one:>7,.0f} trades")
+    print(f"  2. two-arm vs placebo (+{100 * (p_star - p0):.1f} pp), "
+          f"placebo arm {ratio:.2f}x   -> {two_arm:>7,.0f} trades")
+    print(f"\n  binding requirement {need_b:,.0f}   available {pooled['trades']:,}")
+    if pooled["trades"] >= need_b:
+        print(f"\n  VERDICT: STAGE 0b SATISFIED -- Stage 1 may run.")
+    else:
+        print(f"\n  VERDICT: UNDERPOWERED even against the tradeable edge -- stop.")
+    print("\n  Note: p* is what Stage 2 requires to call V3 tradeable. Stage 1 only")
+    print("  asks whether V3 clears break-even, which is a lower bar. V3 hit 72.80%")
+    print("  on 15m; p* here is far above that, so a Stage 1 pass would still leave")
+    print("  Stage 2 a long way off.")
 
 
 if __name__ == "__main__":
