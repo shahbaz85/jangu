@@ -366,9 +366,20 @@ def main():
     while True:
         try:
             now = pd.Timestamp.now(tz="UTC")
+            before = len(st["sent"])
             cycle(cfg, st, now)
             heartbeat_and_summary(st, now)
             save_state(st)
+
+            # A line per cycle, so silence is visibly the market being quiet
+            # rather than the bot being stuck. The candle age is the useful part:
+            # if it stops advancing, fetches are failing even though the loop runs.
+            marks = [pd.Timestamp(v) for v in st["watermark"].values() if v]
+            newest = max(marks) if marks else None
+            age = f"{(now - newest).total_seconds() / 60:.0f}m old" if newest else "none yet"
+            print(f"  {now:%H:%M} UTC  candles {age}  |  "
+                  f"{len(st['sent']) - before} new, {len(st['open'])} open, "
+                  f"{len(st['sent'])} total", flush=True)
         except KeyboardInterrupt:
             print("stopped by user")
             save_state(st)
