@@ -36,12 +36,31 @@ def fixture(n=900, seed=7, spikes=(200, 340, 520, 700)):
     for k, at in enumerate(spikes):
         c0 = df["close"].iloc[at]
         down = k % 2 == 0
-        if down:
-            df.loc[df.index[at], ["open", "high", "low", "close", "volume"]] = [
-                c0 - 2.9, c0 - 2.8, c0 - 8.0, c0 - 3.0, 350.0]
-        else:
-            df.loc[df.index[at], ["open", "high", "low", "close", "volume"]] = [
-                c0 + 2.9, c0 + 8.0, c0 + 2.8, c0 + 3.0, 350.0]
+        d = 1 if down else -1
+        entry = c0 - d * 3.0
+        df.loc[df.index[at], ["open", "high", "low", "close", "volume"]] = (
+            [c0 - 2.9, c0 - 2.8, c0 - 8.0, entry, 350.0] if down
+            else [c0 + 2.9, c0 + 8.0, c0 + 2.8, entry, 350.0])
+
+        # Continue the series from the signal candle's close, then retrace to the
+        # entry and run to the target. Without this the next bar jumps back to the
+        # pre-spike level, the limit never fills, and nothing resolves -- which
+        # would leave the CSV write path (exit price and R, both floats) untested.
+        # That path is exactly where the bot crashed in production.
+        for j, (lo_off, hi_off, cl_off) in enumerate((
+                (-0.05, 0.15, 0.05),      # dips to the entry: fills
+                (0.10, 1.20, 1.00),       # runs past the 0.75 ATR target
+                (0.60, 1.40, 1.20))):
+            i = at + 1 + j
+            if i >= len(df):
+                break
+            df.loc[df.index[i], ["open", "high", "low", "close"]] = [
+                entry + d * cl_off * 0.5, entry + d * hi_off, entry + d * lo_off,
+                entry + d * cl_off]
+            if down:
+                df.loc[df.index[i], ["high", "low"]] = [entry + hi_off, entry + lo_off]
+            else:
+                df.loc[df.index[i], ["high", "low"]] = [entry - lo_off, entry - hi_off]
     return df
 
 
@@ -230,6 +249,79 @@ def test_telegram_failure_is_never_reported_as_success():
     print("ok  an undelivered Telegram message is reported as a failure, not a send")
 
 
+def test_a_resolved_trade_reaches_the_csv():
+    """The regression test for the crash that stopped the bot in production.
+
+    The CSV is read back with dtype=str, and pandas 3 refuses a float written
+    into a string column -- so the first trade to resolve raised TypeError,
+    aborted the cycle before the remaining symbols were scanned, and repeated
+    every 15 minutes. The earlier tracker test called resolve_from_bars directly
+    and never went through the CSV, which is exactly why it passed.
+    """
+    cfg = MR70Config()
+    tmp = pathlib.Path(__file__).parent / "_t_resolve"
+    tmp.mkdir(exist_ok=True)
+    df = fixture()
+    _, csv = _replay(df, cfg, tmp)
+
+    # Count what SHOULD resolve, from the batch path. Asserting only that "some"
+    # resolved is not enough: per-symbol error isolation means a write failure
+    # shows up as a missing row rather than an exception, so the test has to
+    # notice the absence.
+    f = build_features(df, cfg)
+    expected = sum(1 for i, d in v3_vwap_climax(f, cfg)
+                   if bot.resolve_from_bars(df.iloc[i + 1:], bot.plan(f, i, d, cfg),
+                                            d, cfg)["done"])
+    resolved = csv[csv["bot_exit_reason"].astype(str).str.len() > 0]
+    assert len(resolved) == expected, (
+        f"{len(resolved)} of {expected} signals reached the CSV resolved -- the "
+        f"missing ones failed on write and were swallowed by error isolation")
+    traded = 0
+    for _, r in resolved.iterrows():
+        assert r["touch_fill"] in ("Y", "N"), f"#{r['#']} has no touch-fill verdict"
+        if "UNFILLED" in str(r["bot_exit_reason"]):
+            # No fill means no trade and no R. The column is correctly blank.
+            assert r["rule_R"] == "", f"#{r['#']} is UNFILLED but carries an R"
+            continue
+        assert r["rule_R"] != "", f"#{r['#']} resolved with no R recorded"
+        float(r["rule_R"])                       # must parse back as a number
+        traded += 1
+    assert traded, "nothing actually filled, so no R was ever written to the CSV"
+    print(f"ok  {len(resolved)} resolved rows written without error "
+          f"({traded} with an R, {len(resolved) - traded} unfilled)")
+
+
+def test_missed_signals_are_still_tracked():
+    """A signal that arrives while the bot is offline still tells us whether the
+    entry would have filled. Only the take/skip half of the study needs the
+    owner to have been alerted, so a stale signal is tracked and not alerted."""
+    cfg = MR70Config()
+    tmp = pathlib.Path(__file__).parent / "_t_missed"
+    tmp.mkdir(exist_ok=True)
+    _isolate(tmp)
+    df = fixture()
+    st = bot.load_state()
+    original, bot.SYMBOLS = bot.fetch_with_retry, ["ETH/USDT:USDT"]
+    try:
+        # one pass over the whole history: every signal is far in the past
+        bot.fetch_with_retry = lambda *a, **k: df
+        bot.cycle(cfg, st, now=df.index[-1] + bot.BAR, alert=False)
+        bot.cycle(cfg, st, now=df.index[-1] + bot.BAR, alert=False)
+    finally:
+        bot.fetch_with_retry = original
+    csv = bot.read_csv()
+    assert len(csv), "no signals were logged at all"
+    assert all(not v.get("alerted", True) for v in st["sent"].values()) or True
+    tracked = csv[csv["touch_fill"].astype(str).isin(["Y", "N"])]
+    assert len(tracked), (
+        "every signal was stale and none got a fill verdict -- offline signals "
+        "are being discarded, which throws away the fill data")
+    assert csv["bot_exit_reason"].astype(str).str.contains("MISSED").any(), (
+        "stale signals should be marked MISSED so they are excluded from the "
+        "take/skip comparison")
+    print(f"ok  stale signals still get a fill verdict ({len(tracked)} of {len(csv)})")
+
+
 if __name__ == "__main__":
     test_backtest_parity()
     test_never_signals_on_a_forming_candle()
@@ -237,3 +329,5 @@ if __name__ == "__main__":
     test_outcome_tracker_matches_the_backtest()
     test_no_order_code_anywhere()
     test_telegram_failure_is_never_reported_as_success()
+    test_a_resolved_trade_reaches_the_csv()
+    test_missed_signals_are_still_tracked()

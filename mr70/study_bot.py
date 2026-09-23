@@ -208,7 +208,14 @@ def alert_done(n: int, symbol: str, d: int, res: dict) -> str:
 
 
 def upsert(df: pd.DataFrame, number: str, fields: dict) -> pd.DataFrame:
-    """Update the row for this signal number, preserving the owner's own columns."""
+    """Update the row for this signal number, preserving the owner's own columns.
+
+    Every value is written as text. The CSV is read back with dtype=str so the
+    owner's hand-typed columns survive a round trip unchanged, and pandas 3
+    refuses a float assigned into a string column -- which crashed the bot the
+    first time a trade resolved and an exit price was written.
+    """
+    fields = {k: ("" if v is None else str(v)) for k, v in fields.items()}
     mask = df["#"].astype(str) == str(number)
     if mask.any():
         for k, v in fields.items():
@@ -227,75 +234,94 @@ def cycle(cfg: MR70Config, st: dict, now=None, alert=True):
 
     for symbol in SYMBOLS:
         try:
-            raw = fetch_with_retry(symbol, FETCH_DAYS, cfg)
+            df = _process(symbol, cfg, st, now, alert, df)
         except Exception as e:                                   # noqa: BLE001
-            print(f"  {symbol}: fetch failed ({type(e).__name__}), skipping", flush=True)
-            continue
-        if raw is None or raw.empty:
-            continue
-        f = build_features(raw, cfg)
-        ct = f["close_time"]
-        mark = pd.Timestamp(st["watermark"].get(symbol)) if st["watermark"].get(symbol) else None
-
-        for i, d in v3_vwap_climax(f, cfg):
-            close_time = pd.Timestamp(ct.iloc[i])
-            if mark is not None and close_time <= mark:
-                continue
-            if close_time > now:
-                # The candle has not closed yet. data.fetch_ohlcv already drops a
-                # forming bar, but a clock skew or a cached frame could slip one
-                # through, and a signal from an unclosed candle is lookahead.
-                continue
-            sid = signal_id(symbol, close_time, d)
-            if sid in st["sent"]:
-                continue
-            p = plan(f, i, d, cfg)
-            stale = (now - close_time) > STALE_BARS * BAR
-            n = st["next_number"]
-            st["next_number"] += 1
-            st["sent"][sid] = {"n": n, "at": str(close_time)}
-            df = upsert(df, n, {
-                "date_utc": f"{close_time:%Y-%m-%d}", "time_utc": f"{close_time:%H:%M}",
-                "symbol": symbol.split("/")[0], "side": "LONG" if d == 1 else "SHORT",
-                "signal_entry_price": f"{p['entry']:.8f}",
-                "bot_stop": f"{p['stop']:.8f}", "bot_target": f"{p['target']:.8f}",
-                "bot_exit_reason": "MISSED" if stale else "",
-            })
-            if stale:
-                print(f"  MISSED (stale) {sid}", flush=True)
-            else:
-                st["open"][sid] = {"n": n, "symbol": symbol, "dir": d,
-                                   "close_time": str(close_time), **{
-                                       k: float(v) for k, v in p.items()}}
-                if alert:
-                    notify(alert_new(n, symbol, d, close_time, p))
-                print(f"  SIGNAL #{n} {sid}", flush=True)
-
-        st["watermark"][symbol] = str(ct.iloc[-1])
-
-        # advance the open trades on this symbol
-        for sid, rec in list(st["open"].items()):
-            if rec["symbol"] != symbol:
-                continue
-            after = raw[raw.index > pd.Timestamp(rec["close_time"]) - BAR]
-            if after.empty:
-                continue
-            p = {k: rec[k] for k in ("entry", "atr", "stop", "target", "risk_frac")}
-            res = resolve_from_bars(after, p, rec["dir"], cfg)
-            if not res["done"]:
-                continue
-            df = upsert(df, rec["n"], {
-                "paper_fill_traded_through": "Y" if res["strict"] else "N",
-                "touch_fill": "Y" if res["touch"] else "N",
-                "bot_rule_exit_price": res["exit_price"],
-                "bot_exit_reason": res["exit_reason"], "rule_R": res["R"]})
-            if alert:
-                notify(alert_done(rec["n"], symbol, rec["dir"], res))
-            print(f"  RESOLVED #{rec['n']} {sid} {res['exit_reason']}", flush=True)
-            del st["open"][sid]
+            # Isolate per symbol. A failure on the second of four used to abort
+            # the cycle, so the last two were never scanned at all and the CSV
+            # was never written -- one bug silently stopped half the study.
+            print(f"  {symbol}: cycle step failed ({type(e).__name__}): {e}", flush=True)
 
     write_csv(df)
     return df
+
+
+def _process(symbol, cfg, st, now, alert, df):
+    """One symbol: find new signals, then advance its open trades."""
+    try:
+        raw = fetch_with_retry(symbol, FETCH_DAYS, cfg)
+    except Exception as e:                                   # noqa: BLE001
+        print(f"  {symbol}: fetch failed ({type(e).__name__}), skipping", flush=True)
+        return df
+    if raw is None or raw.empty:
+        return df
+    f = build_features(raw, cfg)
+    ct = f["close_time"]
+    mark = pd.Timestamp(st["watermark"].get(symbol)) if st["watermark"].get(symbol) else None
+
+    for i, d in v3_vwap_climax(f, cfg):
+        close_time = pd.Timestamp(ct.iloc[i])
+        if mark is not None and close_time <= mark:
+            continue
+        if close_time > now:
+            # The candle has not closed yet. data.fetch_ohlcv already drops a
+            # forming bar, but a clock skew or a cached frame could slip one
+            # through, and a signal from an unclosed candle is lookahead.
+            continue
+        sid = signal_id(symbol, close_time, d)
+        if sid in st["sent"]:
+            continue
+        p = plan(f, i, d, cfg)
+        stale = (now - close_time) > STALE_BARS * BAR
+        n = st["next_number"]
+        st["next_number"] += 1
+        st["sent"][sid] = {"n": n, "at": str(close_time)}
+        df = upsert(df, n, {
+            "date_utc": f"{close_time:%Y-%m-%d}", "time_utc": f"{close_time:%H:%M}",
+            "symbol": symbol.split("/")[0], "side": "LONG" if d == 1 else "SHORT",
+            "signal_entry_price": f"{p['entry']:.8f}",
+            "bot_stop": f"{p['stop']:.8f}", "bot_target": f"{p['target']:.8f}",
+            "bot_exit_reason": "",
+        })
+        # A stale signal is still tracked, just never alerted. Whether the
+        # owner was at the laptop has no bearing on whether the rule's entry
+        # filled, and the fill rate is the measurement this study exists for.
+        st["open"][sid] = {"n": n, "symbol": symbol, "dir": d,
+                           "close_time": str(close_time), "alerted": not stale,
+                           **{k: float(v) for k, v in p.items()}}
+        if stale:
+            print(f"  MISSED (stale, tracked but not alerted) {sid}", flush=True)
+        else:
+            if alert:
+                notify(alert_new(n, symbol, d, close_time, p))
+            print(f"  SIGNAL #{n} {sid}", flush=True)
+
+    st["watermark"][symbol] = str(ct.iloc[-1])
+
+    # advance the open trades on this symbol
+    for sid, rec in list(st["open"].items()):
+        if rec["symbol"] != symbol:
+            continue
+        after = raw[raw.index > pd.Timestamp(rec["close_time"]) - BAR]
+        if after.empty:
+            continue
+        p = {k: rec[k] for k in ("entry", "atr", "stop", "target", "risk_frac")}
+        res = resolve_from_bars(after, p, rec["dir"], cfg)
+        if not res["done"]:
+            continue
+        was_alerted = rec.get("alerted", True)
+        df = upsert(df, rec["n"], {
+            "paper_fill_traded_through": "Y" if res["strict"] else "N",
+            "touch_fill": "Y" if res["touch"] else "N",
+            "bot_rule_exit_price": res["exit_price"],
+            "bot_exit_reason": res["exit_reason"] if was_alerted
+                               else f"{res['exit_reason']} (MISSED)",
+            "rule_R": res["R"]})
+        if alert and was_alerted:
+            notify(alert_done(rec["n"], symbol, rec["dir"], res))
+        print(f"  RESOLVED #{rec['n']} {sid} {res['exit_reason']}", flush=True)
+        del st["open"][sid]
+    return df
+
 
 
 def heartbeat_and_summary(st: dict, now, alert=True):
