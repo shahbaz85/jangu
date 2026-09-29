@@ -322,6 +322,31 @@ def test_missed_signals_are_still_tracked():
     print(f"ok  stale signals still get a fill verdict ({len(tracked)} of {len(csv)})")
 
 
+def test_coverage_measures_uptime_and_finds_gaps():
+    """A week with few signals is ambiguous unless uptime is recorded: a quiet
+    market and a sleeping laptop look identical afterwards. This is what turns
+    "the bot produced 3 signals instead of 10" into an answerable question."""
+    st = {"coverage": []}
+    t0 = pd.Timestamp("2026-09-22 00:00", tz="UTC")
+    # two hours of cycles, a 30-hour gap, then two more hours
+    for h in list(np.arange(0, 2, 0.25)) + list(np.arange(32, 34, 0.25)):
+        bot.record_coverage(st, t0 + pd.Timedelta(hours=float(h)))
+    now = t0 + pd.Timedelta(hours=34)
+    rep = bot.coverage_report(st, now, days=2)
+
+    assert "gap" in rep, f"a 30-hour outage was not reported:\n{rep}"
+    pct = int(rep.split("days:")[1].split("%")[0].strip())
+    assert 5 <= pct <= 25, f"uptime {pct}% is not ~4h of 48h:\n{rep}"
+
+    unbroken = {"coverage": []}
+    for h in np.arange(0, 24, 0.25):
+        bot.record_coverage(unbroken, t0 + pd.Timedelta(hours=float(h)))
+    rep2 = bot.coverage_report(unbroken, t0 + pd.Timedelta(hours=24), days=1)
+    assert "no gaps" in rep2, f"continuous running reported a gap:\n{rep2}"
+    print(f"ok  coverage reports {pct}% uptime with the outage found, "
+          f"and no gaps when unbroken")
+
+
 if __name__ == "__main__":
     test_backtest_parity()
     test_never_signals_on_a_forming_candle()
@@ -331,3 +356,4 @@ if __name__ == "__main__":
     test_telegram_failure_is_never_reported_as_success()
     test_a_resolved_trade_reaches_the_csv()
     test_missed_signals_are_still_tracked()
+    test_coverage_measures_uptime_and_finds_gaps()

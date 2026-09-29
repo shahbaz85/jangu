@@ -39,7 +39,9 @@ SYMBOLS = ["ETH/USDT:USDT", "BNB/USDT:USDT", "SOL/USDT:USDT", "DOGE/USDT:USDT"]
 
 BAR = pd.Timedelta(minutes=15)
 WAKE_DELAY_S = 20                 # let the exchange settle the closed candle
-FETCH_DAYS = 5                    # comfortably more than the 96-bar windows need
+FETCH_DAYS = 10                   # also the backfill reach: an outage longer than
+                                  # this loses signals permanently, because the
+                                  # bot never sees the candles they fired on
 STALE_BARS = 2                    # older than this: log as MISSED, do not alert
 STRICT_FILL_ATR = 0.05            # "traded through" allowance
 ROUND_TRIP_COST = 0.001           # 0.10% of price, as the spreadsheet assumes
@@ -101,10 +103,57 @@ def both_times(ts: pd.Timestamp) -> str:
 
 
 def load_state() -> dict:
+    blank = {"sent": {}, "next_number": 1, "open": {}, "watermark": {},
+             "last_heartbeat": None, "last_weekly": None, "coverage": []}
     if STATE.exists():
-        return json.loads(STATE.read_text())
-    return {"sent": {}, "next_number": 1, "open": {}, "watermark": {},
-            "last_heartbeat": None, "last_weekly": None}
+        st = json.loads(STATE.read_text())
+        for k, v in blank.items():
+            st.setdefault(k, v)
+        return st
+    return blank
+
+
+def record_coverage(st: dict, now: pd.Timestamp, max_gap_min: int = 40):
+    """Track when the bot was actually watching.
+
+    Without this, a week with few signals is ambiguous: a quiet market and a
+    sleeping laptop look identical afterwards. Each cycle extends the current
+    window, or opens a new one if more than `max_gap_min` has passed -- which
+    turns "did it run?" from a guess into a number.
+    """
+    cov = st["coverage"]
+    stamp = now.isoformat()
+    if cov and (now - pd.Timestamp(cov[-1][1])) <= pd.Timedelta(minutes=max_gap_min):
+        cov[-1][1] = stamp
+    else:
+        cov.append([stamp, stamp])
+    if len(cov) > 500:                       # keep the file small
+        st["coverage"] = cov[-500:]
+
+
+def coverage_report(st: dict, now: pd.Timestamp, days: int = 7) -> str:
+    """Uptime and the gaps, over the last `days`."""
+    since = now - pd.Timedelta(days=days)
+    windows = [(max(pd.Timestamp(a), since), pd.Timestamp(b))
+               for a, b in st["coverage"] if pd.Timestamp(b) >= since]
+    up = sum((b - a).total_seconds() for a, b in windows if b > a)
+    total = (now - since).total_seconds()
+    lines = [f"Coverage over the last {days} days: {up / total:.0%} "
+             f"({up / 3600:.1f}h of {total / 3600:.0f}h)"]
+    gaps = []
+    prev = since
+    for a, b in windows:
+        if (a - prev).total_seconds() > 3600:
+            gaps.append((prev, a))
+        prev = max(prev, b)
+    if (now - prev).total_seconds() > 3600:
+        gaps.append((prev, now))
+    for a, b in gaps[-8:]:
+        lines.append(f"  gap {a:%d %b %H:%M} -> {b:%d %b %H:%M}  "
+                     f"({(b - a).total_seconds() / 3600:.1f}h)")
+    if not gaps:
+        lines.append("  no gaps over an hour")
+    return "\n".join(lines)
 
 
 def save_state(st: dict):
@@ -348,6 +397,7 @@ def heartbeat_and_summary(st: dict, now, alert=True):
             msg.append(f"Fill rate: touch {touch:.0%}, traded-through {strict:.0%}")
             msg.append(f"Rule win rate {(r > 0).mean():.0%}, average {r.mean():+.2f} R "
                        f"on {len(r)} resolved")
+        msg.append(coverage_report(st, now).splitlines()[0])
         msg.append("Fewer than 50 signals: treat these numbers as noise."
                    if len(done) < 50 else "Sample is past 50; still small.")
         if alert:
@@ -367,8 +417,14 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--once", action="store_true")
     ap.add_argument("--test-message", action="store_true")
+    ap.add_argument("--coverage", action="store_true",
+                    help="report uptime and gaps, then exit")
     args = ap.parse_args()
     cfg = MR70Config()
+
+    if args.coverage:
+        print(coverage_report(load_state(), pd.Timestamp.now(tz="UTC")))
+        return
 
     if args.test_message:
         ok, why = telegram_send(
@@ -393,6 +449,7 @@ def main():
         try:
             now = pd.Timestamp.now(tz="UTC")
             before = len(st["sent"])
+            record_coverage(st, now)
             cycle(cfg, st, now)
             heartbeat_and_summary(st, now)
             save_state(st)
