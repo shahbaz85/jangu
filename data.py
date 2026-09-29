@@ -32,7 +32,10 @@ def save_csv(df, path):
 
 def load_csv(path):
     df = pd.read_csv(path)
-    df.index = pd.to_datetime(df.pop(df.columns[0]), utc=True)
+    # ISO8601 rather than letting pandas infer: it locks onto the first row's
+    # format and rejects any row with different sub-second precision, which
+    # makes a cache that writes cleanly unreadable afterwards.
+    df.index = pd.to_datetime(df.pop(df.columns[0]), utc=True, format="ISO8601")
     return df[["open", "high", "low", "close", "volume"]].astype(float).sort_index()
 
 

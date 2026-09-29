@@ -189,6 +189,37 @@ def test_interval_hours_keeps_the_first_payment():
     print("ok  interval_hours keeps the first payment at the modal spacing")
 
 
+def test_cache_survives_a_round_trip():
+    """A cache that writes cleanly and cannot be read back is worse than none.
+
+    This is the bug that stopped carry Stage 1: funding timestamps mix exact
+    hours with millisecond values, pandas 3 infers a format from the first row,
+    and every later row that differs raises. Stage 0 passed once because it
+    fetched fresh; every run afterwards failed.
+    """
+    import tempfile
+
+    from data import load_csv, save_csv
+
+    mixed = pd.DatetimeIndex(["2021-09-23 08:00:00+00:00",
+                              "2021-09-23 16:00:00.123000+00:00",
+                              "2021-09-24 00:00:00+00:00"])
+    with tempfile.TemporaryDirectory() as d:
+        fp = pathlib.Path(d) / "f.csv"
+        pd.DataFrame({"rate": [1e-4, 2e-4, 3e-4]}, index=mixed).to_csv(fp, index_label="time")
+        back = pd.read_csv(fp)
+        idx = pd.to_datetime(back.pop(back.columns[0]), utc=True, format="ISO8601")
+        assert len(idx) == 3 and idx.is_monotonic_increasing, "funding index did not round trip"
+
+        cp = pathlib.Path(d) / "c.csv"
+        cols = {"open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5, "volume": 10.0}
+        save_csv(pd.DataFrame({k: [v] * 3 for k, v in cols.items()}, index=mixed), cp)
+        got = load_csv(cp)
+        assert len(got) == 3, f"candle cache lost rows on read ({len(got)} of 3)"
+        assert list(got.columns) == list(cols), "candle columns changed on round trip"
+    print("ok  funding and candle caches survive mixed-precision timestamps")
+
+
 if __name__ == "__main__":
     test_hedge_cancels_price_exactly()
     test_basis_move_is_what_survives()
@@ -201,3 +232,4 @@ if __name__ == "__main__":
     test_benchmark_guard_refuses_an_unset_value()
     test_funding_alignment_never_reads_a_later_candle()
     test_interval_hours_keeps_the_first_payment()
+    test_cache_survives_a_round_trip()

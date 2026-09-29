@@ -71,7 +71,12 @@ def funding(symbol: str, cfg) -> pd.DataFrame:
     path = _cache(f"{symbol}_funding.csv")
     if path.exists():
         df = pd.read_csv(path)
-        df.index = pd.to_datetime(df.pop(df.columns[0]), utc=True)
+        # format="ISO8601" is required, not tidiness. pandas 3 infers a format
+        # from the first row and rejects every row that differs, and funding
+        # timestamps are a mix: most land on exact hours, a few carry
+        # milliseconds. The file therefore wrote fine and failed on read, so the
+        # cache worked once and broke every run after it.
+        df.index = pd.to_datetime(df.pop(df.columns[0]), utc=True, format="ISO8601")
         return df[["rate"]].astype(float).sort_index()
     print(f"  fetching {symbol} funding...", flush=True)
     df = with_retry(fetch_funding, f"{symbol}/USDT:USDT", cfg.days, cfg.perp_exchange)
