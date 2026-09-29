@@ -335,7 +335,11 @@ def test_coverage_measures_uptime_and_finds_gaps():
     rep = bot.coverage_report(st, now, days=2)
 
     assert "gap" in rep, f"a 30-hour outage was not reported:\n{rep}"
-    pct = int(rep.split("days:")[1].split("%")[0].strip())
+    # Parse the first percentage rather than a fixed phrase, so rewording the
+    # report does not silently break the assertion.
+    found = re.search(r"(\d+)%", rep)
+    assert found, f"no percentage in the report:\n{rep}"
+    pct = int(found.group(1))
     assert 5 <= pct <= 25, f"uptime {pct}% is not ~4h of 48h:\n{rep}"
 
     # Time before the first recorded cycle must not be reported as downtime.
