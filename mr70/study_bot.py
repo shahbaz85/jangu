@@ -132,14 +132,32 @@ def record_coverage(st: dict, now: pd.Timestamp, max_gap_min: int = 40):
 
 
 def coverage_report(st: dict, now: pd.Timestamp, days: int = 7) -> str:
-    """Uptime and the gaps, over the last `days`."""
+    """Uptime and the gaps, over the last `days`.
+
+    Time before the first recorded cycle is NOT a gap -- it is time nobody
+    measured. Reporting it as downtime would be exactly the mistake this whole
+    project has been trying to avoid: treating absence of evidence as evidence.
+    """
     since = now - pd.Timedelta(days=days)
+    starts = [pd.Timestamp(a) for a, _ in st["coverage"]]
+    if not starts:
+        return ("No coverage recorded yet. Uptime tracking starts from the first "
+                "cycle after this feature was added, so nothing can be said about "
+                "earlier days.")
+    first = min(starts)
+    unmeasured = max(pd.Timedelta(0), first - since)
+    since = max(since, first)
     windows = [(max(pd.Timestamp(a), since), pd.Timestamp(b))
                for a, b in st["coverage"] if pd.Timestamp(b) >= since]
     up = sum((b - a).total_seconds() for a, b in windows if b > a)
     total = (now - since).total_seconds()
-    lines = [f"Coverage over the last {days} days: {up / total:.0%} "
-             f"({up / 3600:.1f}h of {total / 3600:.0f}h)"]
+    if total <= 0:
+        return f"Coverage recording started {first:%d %b %H:%M} UTC; nothing to report yet."
+    lines = [f"Coverage since recording began ({first:%d %b %H:%M} UTC): "
+             f"{up / total:.0%} ({up / 3600:.1f}h of {total / 3600:.1f}h)"]
+    if unmeasured > pd.Timedelta(hours=1):
+        lines.append(f"  the {unmeasured.total_seconds() / 3600:.0f}h before that is "
+                     f"unmeasured, not downtime -- tracking did not exist yet")
     gaps = []
     prev = since
     for a, b in windows:

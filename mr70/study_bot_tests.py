@@ -338,6 +338,15 @@ def test_coverage_measures_uptime_and_finds_gaps():
     pct = int(rep.split("days:")[1].split("%")[0].strip())
     assert 5 <= pct <= 25, f"uptime {pct}% is not ~4h of 48h:\n{rep}"
 
+    # Time before the first recorded cycle must not be reported as downtime.
+    fresh = {"coverage": []}
+    bot.record_coverage(fresh, now)
+    rep_fresh = bot.coverage_report(fresh, now + pd.Timedelta(minutes=15), days=7)
+    assert "gap" not in rep_fresh.lower() or "unmeasured" in rep_fresh, (
+        f"a first run reported earlier days as downtime:\n{rep_fresh}")
+    assert "unmeasured" in rep_fresh, (
+        f"the unmeasured period should be named as such:\n{rep_fresh}")
+
     unbroken = {"coverage": []}
     for h in np.arange(0, 24, 0.25):
         bot.record_coverage(unbroken, t0 + pd.Timedelta(hours=float(h)))
